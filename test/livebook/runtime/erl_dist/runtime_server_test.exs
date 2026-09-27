@@ -1,7 +1,8 @@
 defmodule Livebook.Runtime.ErlDist.RuntimeServerTest do
   use ExUnit.Case, async: true
 
-  alias Livebook.Runtime.ErlDist.{NodeManager, RuntimeServer}
+  alias Livebook.Runtime.ErlDist.NodeManager
+  alias Livebook.Runtime.ErlDist.RuntimeServer
 
   setup ctx do
     {:ok, runtime_server_pid} = NodeManager.start_runtime_server(node(), ctx[:opts] || [])
@@ -150,7 +151,7 @@ defmodule Livebook.Runtime.ErlDist.RuntimeServerTest do
   describe "handle_intellisense/6 given completion request" do
     test "provides basic completion when no evaluation reference is given", %{pid: pid} do
       request = {:completion, "System.ver"}
-      ref = RuntimeServer.handle_intellisense(pid, self(), request, [], nil)
+      ref = RuntimeServer.handle_intellisense(pid, self(), :elixir, request, [], nil)
 
       assert_receive {:runtime_intellisense_response, ^ref, ^request,
                       %{items: [%{label: "version/0"}]}}
@@ -168,7 +169,7 @@ defmodule Livebook.Runtime.ErlDist.RuntimeServerTest do
       request = {:completion, "num"}
 
       ref =
-        RuntimeServer.handle_intellisense(pid, self(), request, [{:c1, :e1}], nil)
+        RuntimeServer.handle_intellisense(pid, self(), :elixir, request, [{:c1, :e1}], nil)
 
       assert_receive {:runtime_intellisense_response, ^ref, ^request,
                       %{items: [%{label: "number"}]}}
@@ -176,7 +177,7 @@ defmodule Livebook.Runtime.ErlDist.RuntimeServerTest do
       request = {:completion, "ANSI.brigh"}
 
       ref =
-        RuntimeServer.handle_intellisense(pid, self(), request, [{:c1, :e1}], nil)
+        RuntimeServer.handle_intellisense(pid, self(), :elixir, request, [{:c1, :e1}], nil)
 
       assert_receive {:runtime_intellisense_response, ^ref, ^request,
                       %{items: [%{label: "bright/0"}]}}
@@ -186,7 +187,7 @@ defmodule Livebook.Runtime.ErlDist.RuntimeServerTest do
   describe "handle_intellisense/6 given details request" do
     test "responds with identifier details", %{pid: pid} do
       request = {:details, "System.version", 10}
-      ref = RuntimeServer.handle_intellisense(pid, self(), request, [], nil)
+      ref = RuntimeServer.handle_intellisense(pid, self(), :elixir, request, [], nil)
 
       assert_receive {:runtime_intellisense_response, ^ref, ^request,
                       %{range: %{from: 1, to: 15}, contents: [_]}}
@@ -196,7 +197,7 @@ defmodule Livebook.Runtime.ErlDist.RuntimeServerTest do
   describe "handle_intellisense/6 given format request" do
     test "responds with a formatted code", %{pid: pid} do
       request = {:format, "System.version"}
-      ref = RuntimeServer.handle_intellisense(pid, self(), request, [], nil)
+      ref = RuntimeServer.handle_intellisense(pid, self(), :elixir, request, [], nil)
 
       assert_receive {:runtime_intellisense_response, ^ref, ^request, %{code: "System.version()"}}
     end
@@ -341,13 +342,12 @@ defmodule Livebook.Runtime.ErlDist.RuntimeServerTest do
     end
   end
 
-  test "clients monitoring", %{pid: pid, test: test} do
+  test "clients monitoring", %{pid: pid} do
     # Pretend we are the subscriber
-    Process.register(self(), test)
 
     code =
       """
-      pid = Process.whereis(#{inspect(test)})
+      pid = IEx.Helpers.pid("#{inspect(self())}")
 
       ref = make_ref()
       send(Process.group_leader(), {:io_request, self(), ref, {:livebook_monitor_clients, pid}})

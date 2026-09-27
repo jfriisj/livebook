@@ -3,8 +3,6 @@ defmodule LivebookWeb.OpenLive.UrlComponent do
 
   import Ecto.Changeset
 
-  alias Livebook.{Utils, Notebook}
-
   @impl true
   def mount(socket) do
     {:ok, assign(socket, changeset: changeset(), error_message: nil)}
@@ -40,7 +38,7 @@ defmodule LivebookWeb.OpenLive.UrlComponent do
         {@error_message}
       </div>
       <p class="text-gray-700" id="import-from-url">
-        Paste the URL to a .livemd file, to a GitHub file, or to a Gist.
+        Paste the URL to a .livemd file, to a GitHub file, or to a Gist. Import only URLs you trust.
       </p>
       <.form
         :let={f}
@@ -84,11 +82,11 @@ defmodule LivebookWeb.OpenLive.UrlComponent do
     |> apply_action(:insert)
     |> case do
       {:ok, data} ->
-        origin = Notebook.ContentLoader.url_to_location(data.url)
+        origin = Livebook.Notebook.ContentLoader.url_to_location(data.url)
         files_url = Livebook.Utils.expand_url(data.url, "files/")
 
         origin
-        |> Notebook.ContentLoader.fetch_content_from_location()
+        |> Livebook.Notebook.ContentLoader.fetch_content_from_location()
         |> case do
           {:ok, content} ->
             opts = [origin: origin, files_source: {:url, files_url}]
@@ -98,7 +96,7 @@ defmodule LivebookWeb.OpenLive.UrlComponent do
           {:error, message} ->
             assign(socket,
               changeset: changeset(data),
-              error_message: Utils.upcase_first(message)
+              error_message: Livebook.Utils.upcase_first(message)
             )
         end
 

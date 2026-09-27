@@ -10,11 +10,16 @@ config :livebook, LivebookWeb.Endpoint,
   render_errors: [formats: [html: LivebookWeb.ErrorHTML], layout: false]
 
 # Configures Elixir's Logger
-config :logger, :console,
+config :logger, :default_formatter,
   format: "$date $time $metadata[$level] $message\n",
   metadata: [:request_id]
 
 config :phoenix, :json_library, JSON
+
+# Configure bun (the version is required)
+config :bun,
+  version: "1.3.10",
+  assets: [args: ~w(), cd: Path.expand("../assets", __DIR__)]
 
 # Additional mime types
 config :mime, :types, %{
@@ -27,6 +32,7 @@ config :livebook,
   allowed_uri_schemes: [],
   app_service_name: nil,
   app_service_url: nil,
+  apps_banner: nil,
   authentication: :token,
   aws_credentials: false,
   feature_flags: [],
@@ -35,7 +41,7 @@ config :livebook,
   plugs: [],
   rewrite_on: [],
   shutdown_callback: nil,
-  teams_auth?: false,
+  teams_auth: nil,
   teams_url: "https://teams.livebook.dev",
   github_release_info: %{repo: "livebook-dev/livebook", version: Mix.Project.config()[:version]},
   update_instructions_url: nil,

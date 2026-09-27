@@ -330,6 +330,34 @@ defmodule Livebook.Utils do
     end
   end
 
+  @doc ~S"""
+  Quotes the given string, such that POSIX shells treat it as a single
+  literal argument.
+
+  This should be used whenever building shell commands that include
+  arbitrary values.
+
+  ## Examples
+
+      iex> Livebook.Utils.shell_quote("value")
+      "'value'"
+
+      iex> Livebook.Utils.shell_quote("$(echo hi)")
+      "'$(echo hi)'"
+
+      iex> Livebook.Utils.shell_quote("it's")
+      "'it'\\''s'"
+
+  """
+  @spec shell_quote(String.t()) :: String.t()
+  def shell_quote(string) do
+    # Within single quotes the shell treats every character literally,
+    # so the only character we need to handle is the single quote
+    # itself. We close the quoted string, add an escaped single quote
+    # and open a new quoted string.
+    "'" <> String.replace(string, "'", "'\\''") <> "'"
+  end
+
   @doc """
   Changes the first letter in the given string to upper case.
 
@@ -518,19 +546,21 @@ defmodule Livebook.Utils do
     cmd_args =
       case :os.type() do
         {:win32, _} ->
-          {"cmd", win_cmd_args}
+          {"cmd", win_cmd_args, []}
 
         {:unix, :darwin} ->
-          {"open", [url]}
+          {"open", [url], []}
 
         {:unix, _} ->
+          env = appimage_env_overrides()
+
           cond do
-            System.find_executable("xdg-open") ->
-              {"xdg-open", [url]}
+            exe = find_xdg_open(env) ->
+              {exe, [url], env}
 
             # When inside WSL
             System.find_executable("cmd.exe") ->
-              {"cmd.exe", win_cmd_args}
+              {"cmd.exe", win_cmd_args, []}
 
             true ->
               nil
@@ -538,11 +568,138 @@ defmodule Livebook.Utils do
       end
 
     case cmd_args do
-      {cmd, args} -> System.cmd(cmd, args)
-      nil -> Logger.warning("could not open the browser, no open command found in the system")
+      {cmd, args, env} ->
+        System.cmd(cmd, args, env: env)
+
+      nil ->
+        Logger.warning("could not open the browser, no open command found in the system")
     end
 
     :ok
+  end
+
+  @doc """
+  Opens the given `path` for editing.
+  """
+  def open_file(path) do
+    win_cmd_args = {"cmd.exe", ["/c", "start", "", "notepad.exe", path], []}
+
+    cmd_args =
+      case :os.type() do
+        {:win32, _} ->
+          win_cmd_args
+
+        {:unix, :darwin} ->
+          {"open", [path], []}
+
+        {:unix, _} ->
+          env = appimage_env_overrides()
+
+          cond do
+            # When inside WSL
+            System.find_executable("cmd.exe") ->
+              win_cmd_args
+
+            exe = find_xdg_open(env) ->
+              {exe, [path], env}
+
+            true ->
+              nil
+          end
+      end
+
+    case cmd_args do
+      {cmd, args, env} ->
+        System.cmd(cmd, args, env: env)
+
+      nil ->
+        Logger.warning("could not open #{path}, no open command found in the system")
+    end
+
+    :ok
+  end
+
+  # When running inside an AppImage, the runtime injects paths pointing into
+  # the mounted AppImage that break external programs (e.g. xdg-open links
+  # against the bundled libssl but the system libssl requires a newer OpenSSL).
+  # This returns env overrides to clean up the environment for child processes.
+  #
+  # See https://github.com/tauri-apps/tauri/issues/10078
+  defp appimage_env_overrides do
+    case System.get_env("APPIMAGE") do
+      nil ->
+        []
+
+      _ ->
+        appdir = System.get_env("APPDIR", "")
+
+        removed =
+          ~w(
+            APPDIR
+            APPIMAGE
+            BABL_PATH
+            __EGL_VENDOR_LIBRARY_DIRS
+            GBM_BACKENDS_PATH
+            GCONV_PATH
+            GDK_PIXBUF_MODULEDIR
+            GDK_PIXBUF_MODULE_FILE
+            GEGL_PATH
+            GIO_MODULE_DIR
+            GI_TYPELIB_PATH
+            GSETTINGS_SCHEMA_DIR
+            GST_PLUGIN_PATH
+            GST_PLUGIN_SCANNER
+            GST_PLUGIN_SYSTEM_PATH
+            GST_PLUGIN_SYSTEM_PATH_1_0
+            GTK_DATA_PREFIX
+            GTK_EXE_PREFIX
+            GTK_IM_MODULE_FILE
+            GTK_PATH
+            LD_LIBRARY_PATH
+            LIBDECOR_PLUGIN_DIR
+            LIBGL_DRIVERS_PATH
+            LIBVA_DRIVERS_PATH
+            PERLLIB
+            PIPEWIRE_MODULE_DIR
+            QT_PLUGIN_PATH
+            SPA_PLUGIN_DIR
+            TCL_LIBRARY
+            TK_LIBRARY
+            XTABLES_LIBDIR
+          )
+          |> Enum.map(&{&1, nil})
+
+        # Strip AppImage-injected entries from path-like vars, but preserve
+        # anything under rel/ which contains the bundled OTP
+        path_overrides =
+          for var <- ~w(PATH XDG_DATA_DIRS),
+              val = System.get_env(var) do
+            filtered =
+              val
+              |> String.split(":")
+              |> Enum.reject(
+                &(String.starts_with?(&1, appdir) and not String.starts_with?(&1, "#{appdir}/rel"))
+              )
+              |> Enum.join(":")
+
+            {var, filtered}
+          end
+
+        removed ++ path_overrides
+    end
+  end
+
+  defp find_xdg_open(env) do
+    case List.keyfind(env, "PATH", 0) do
+      nil ->
+        System.find_executable("xdg-open")
+
+      {"PATH", path} ->
+        Enum.find_value(String.split(path, ":"), fn dir ->
+          full = Path.join(dir, "xdg-open")
+          if File.regular?(full), do: full
+        end)
+    end
   end
 
   @doc """
@@ -569,7 +726,7 @@ defmodule Livebook.Utils do
 
       parts ->
         {start, length} = List.last(parts)
-        <<left::binary-size(start), _::binary-size(length), right::binary>> = string
+        <<left::binary-size(^start), _::binary-size(^length), right::binary>> = string
         {:ok, left, right}
     end
   end
@@ -634,7 +791,7 @@ defmodule Livebook.Utils do
         text
 
       {pos, _len} ->
-        <<_ignore::binary-size(pos), rest::binary>> = text
+        <<_ignore::binary-size(^pos), rest::binary>> = text
         "..." <> rest
     end
   end
@@ -782,7 +939,14 @@ defmodule Livebook.Utils do
     Req.Request.append_request_steps(req,
       connect_options: fn request ->
         uri = URI.parse(request.url)
-        connect_options = mint_connect_options_for_uri(uri)
+
+        # We use a step, because the configuration depends on the URL,
+        # but we allow any specified :connect_options to take precedence.
+        connect_options =
+          uri
+          |> mint_connect_options_for_uri()
+          |> Keyword.merge(Req.Request.get_option(request, :connect_options, []))
+
         Req.Request.merge_options(request, connect_options: connect_options)
       end
     )
@@ -847,6 +1011,9 @@ defmodule Livebook.Utils do
             into: %{}
       end
 
-    [users: inspect(list)]
+    case Application.get_env(:livebook, :log_format) do
+      :text -> [users: inspect(list)]
+      :json -> [users: list]
+    end
   end
 end

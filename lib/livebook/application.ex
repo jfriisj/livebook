@@ -4,7 +4,9 @@ defmodule Livebook.Application do
   require Logger
 
   def start(_type, _args) do
-    Livebook.ZTA.init()
+    setup_tests()
+
+    Logger.add_handlers(:livebook)
     create_teams_hub = parse_teams_hub()
     setup_optional_dependencies()
     ensure_directories!()
@@ -55,6 +57,10 @@ defmodule Livebook.Application do
           {DynamicSupervisor, name: Livebook.HubsSupervisor, strategy: :one_for_one},
           # Run startup logic relying on the supervision tree
           {Livebook.Utils.SupervisionStep, {:boot, boot(create_teams_hub)}},
+          # Start the server responsible for initializing
+          # mountable file systems. We do it after boot, because
+          # file systems and this depends on hubs being started
+          Livebook.FileSystem.Mounter,
           # App manager supervision tree. We do it after boot, because
           # permanent apps are going to be started right away and this
           # depends on hubs being started
@@ -92,7 +98,7 @@ defmodule Livebook.Application do
       clear_env_vars()
       Livebook.Hubs.connect_hubs()
 
-      unless serverless?() do
+      if not serverless?() do
         load_apps_dir()
       end
     end
@@ -192,9 +198,16 @@ defmodule Livebook.Application do
   @app? Mix.target() == :app
 
   if @app? do
-    defp app_specs, do: [LivebookApp]
+    defp app_specs do
+      [
+        {ElixirKit.PubSub, connect: System.fetch_env!("ELIXIRKIT_PUBSUB")},
+        LivebookApp
+      ]
+    end
   else
-    defp app_specs, do: []
+    defp app_specs do
+      []
+    end
   end
 
   # In order to provide good first experience with the desktop app,
@@ -293,15 +306,16 @@ defmodule Livebook.Application do
 
     cond do
       teams_key && auth ->
-        Application.put_env(:livebook, :teams_auth?, true)
-
         {hub_id, fun} =
           case String.split(auth, ":") do
             ["offline", name, public_key] ->
+              Application.put_env(:livebook, :teams_auth, :offline)
               hub_id = "team-#{name}"
+
               {hub_id, fn -> create_offline_hub(teams_key, hub_id, name, public_key) end}
 
             ["online", name, org_id, org_key_id, agent_key] ->
+              Application.put_env(:livebook, :teams_auth, :online)
               hub_id = "team-" <> name
 
               with :error <- Application.fetch_env(:livebook, :identity_provider) do
@@ -429,5 +443,17 @@ defmodule Livebook.Application do
 
   defp serverless?() do
     Application.get_env(:livebook, :serverless, false)
+  end
+
+  if Mix.env() == :test do
+    defp setup_tests() do
+      data_path = Livebook.Config.data_path()
+      # Clear data path for tests
+      if File.exists?(data_path) do
+        File.rm_rf!(data_path)
+      end
+    end
+  else
+    defp setup_tests(), do: :ok
   end
 end

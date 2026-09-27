@@ -1,27 +1,29 @@
 defmodule LivebookWeb.Integration.Hub.EditLiveTest do
   use Livebook.TeamsIntegrationCase, async: true
 
-  import Phoenix.LiveViewTest
-  import Livebook.TestHelpers
-
   alias Livebook.Hubs
 
+  import Livebook.TestHelpers
+  import Phoenix.LiveViewTest
+
+  setup :teams
+
+  @moduletag subscribe_to_hubs_topics: [:crud, :connection, :secrets, :file_systems]
+  @moduletag subscribe_to_teams_topics: [:clients, :agents]
+
   describe "user" do
-    setup %{user: user, node: node} do
-      Livebook.Hubs.Broadcasts.subscribe([:crud, :connection, :secrets, :file_systems])
-      Livebook.Teams.Broadcasts.subscribe([:clients, :deployment_groups])
-      hub = create_team_hub(user, node)
-      id = hub.id
+    @describetag teams_for: :user
 
-      assert_receive {:hub_connected, ^id}
-      assert_receive {:client_connected, ^id}
+    setup %{team: team} = tags do
+      if tags[:git] do
+        Livebook.FileSystem.Mounter.subscribe(team.id)
+      end
 
-      {:ok, hub: hub}
+      :ok
     end
 
-    test "updates the hub", %{conn: conn, hub: hub} do
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
-
+    test "updates the hub", %{conn: conn, team: team} do
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
       attrs = %{"hub_emoji" => "🐈"}
 
       view
@@ -40,16 +42,16 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       assert update =~ "Workspace updated successfully"
       assert update =~ "🐈"
 
-      id = hub.id
+      id = team.id
       assert_receive {:hub_changed, ^id}
 
-      assert_sidebar_hub(view, id, hub.hub_name, attrs["hub_emoji"])
-      refute Hubs.fetch_hub!(hub.id) == hub
+      assert_sidebar_hub(view, id, team.hub_name, attrs["hub_emoji"])
+      refute Hubs.fetch_hub!(team.id) == team
     end
 
-    test "deletes the hub", %{conn: conn, hub: hub} do
-      id = hub.id
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+    test "deletes the hub", %{conn: conn, team: team} do
+      id = team.id
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
       view
       |> element("#delete-hub", "Delete workspace")
@@ -66,9 +68,9 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       assert_raise Livebook.Storage.NotFoundError, fn -> Hubs.fetch_hub!(id) end
     end
 
-    test "creates a secret", %{conn: conn, hub: hub} do
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
-      secret = build(:secret, hub_id: hub.id)
+    test "creates a secret", %{conn: conn, team: team} do
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
+      secret = build(:secret, hub_id: team.id)
 
       attrs = %{
         secret: %{
@@ -84,7 +86,7 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       |> element("#add-secret")
       |> render_click(%{})
 
-      assert_patch(view, ~p"/hub/#{hub.id}/secrets/new")
+      assert_patch(view, ~p"/hub/#{team.id}/secrets/new")
       assert render(view) =~ "Add secret"
 
       view
@@ -100,25 +102,24 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       |> render_submit(attrs)
 
       assert_receive {:secret_created, ^secret}
-      assert_patch(view, "/hub/#{hub.id}")
+      assert_patch(view, "/hub/#{team.id}")
       assert render(view) =~ "Secret #{secret.name} added successfully"
       assert render(element(view, "#hub-secrets-list")) =~ secret.name
-      assert secret in Livebook.Hubs.get_secrets(hub)
+      assert secret in Livebook.Hubs.get_secrets(team)
 
       # Guarantee it shows the error from API
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}/secrets/new")
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}/secrets/new")
 
       assert view
              |> element("#secrets-form")
              |> render_submit(attrs) =~ "has already been taken"
     end
 
-    test "updates existing secret", %{conn: conn, hub: hub} do
-      secret = insert_secret(hub_id: hub.id)
-
+    test "updates existing secret", %{conn: conn, team: team, node: node, org_key: org_key} do
+      secret = TeamsRPC.create_secret(node, team, org_key)
       assert_receive {:secret_created, ^secret}
 
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
       attrs = %{
         secret: %{
@@ -134,7 +135,7 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       |> element("#hub-secrets-list [aria-label=\"edit #{secret.name}\"]")
       |> render_click(%{"secret_name" => secret.name})
 
-      assert_patch(view, ~p"/hub/#{hub.id}/secrets/edit/#{secret.name}")
+      assert_patch(view, ~p"/hub/#{team.id}/secrets/edit/#{secret.name}")
       assert render(view) =~ "Edit secret"
 
       view
@@ -152,17 +153,17 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       updated_secret = %{secret | value: new_value}
 
       assert_receive {:secret_updated, ^updated_secret}
-      assert_patch(view, "/hub/#{hub.id}")
+      assert_patch(view, "/hub/#{team.id}")
       assert render(view) =~ "Secret #{secret.name} updated successfully"
       assert render(element(view, "#hub-secrets-list")) =~ secret.name
-      assert updated_secret in Livebook.Hubs.get_secrets(hub)
+      assert updated_secret in Livebook.Hubs.get_secrets(team)
     end
 
-    test "deletes existing secret", %{conn: conn, hub: hub} do
-      secret = insert_secret(hub_id: hub.id)
+    test "deletes existing secret", %{conn: conn, team: team, node: node, org_key: org_key} do
+      secret = TeamsRPC.create_secret(node, team, org_key)
       assert_receive {:secret_created, ^secret}
 
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
       refute view
              |> element("#secrets-form button[disabled]")
@@ -175,35 +176,40 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       render_confirm(view)
 
       assert_receive {:secret_deleted, ^secret}
-      assert_patch(view, "/hub/#{hub.id}")
+      assert_patch(view, "/hub/#{team.id}")
       assert render(view) =~ "Secret #{secret.name} deleted successfully"
-      refute secret in Livebook.Hubs.get_secrets(hub)
+      refute secret in Livebook.Hubs.get_secrets(team)
     end
 
-    test "raises an error if does not exist secret", %{conn: conn, hub: hub} do
+    test "raises an error if does not exist secret", %{conn: conn, team: team} do
       assert_raise LivebookWeb.NotFoundError, fn ->
-        live(conn, ~p"/hub/#{hub.id}/secrets/edit/HELLO")
+        live(conn, ~p"/hub/#{team.id}/secrets/edit/HELLO")
       end
     end
 
-    test "creates a file system", %{conn: conn, hub: hub} do
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+    test "creates a S3 file system", %{conn: conn, team: team} do
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
       bypass = Bypass.open()
-      file_system = build_bypass_file_system(bypass, hub.id)
+      file_system = build_bypass_file_system(bypass, team.id)
       id = file_system.id
-      attrs = %{file_system: Livebook.FileSystem.dump(file_system)}
+
+      form_values =
+        Map.from_struct(file_system)
+        |> Map.take([:bucket_url, :region, :access_key_id, :secret_access_key])
+
+      attrs = %{file_system: form_values}
 
       expect_s3_listing(bypass)
-
       refute render(view) =~ file_system.bucket_url
 
       view
       |> element("#add-file-system")
       |> render_click(%{})
 
-      assert_patch(view, ~p"/hub/#{hub.id}/file-systems/new")
+      assert_patch(view, ~p"/hub/#{team.id}/file-systems/new")
       assert render(view) =~ "Add file storage"
+      assert has_element?(view, "#file_system_type-s3")
 
       view
       |> element("#file-systems-form")
@@ -217,32 +223,82 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       |> element("#file-systems-form")
       |> render_submit(attrs)
 
-      assert_receive {:file_system_created, %{id: ^id} = file_system}
-      assert_patch(view, "/hub/#{hub.id}")
+      assert_receive {:file_system_created, %Livebook.FileSystem.S3{id: ^id} = file_system}
+      assert_patch(view, "/hub/#{team.id}")
       assert render(view) =~ "File storage added successfully"
       assert render(element(view, "#hub-file-systems-list")) =~ file_system.bucket_url
-      assert file_system in Livebook.Hubs.get_file_systems(hub)
+      assert file_system in Livebook.Hubs.get_file_systems(team)
     end
 
-    test "updates existing file system", %{conn: conn, hub: hub} do
-      bypass = Bypass.open()
-      file_system = build_bypass_file_system(bypass, hub.id)
-      id = file_system.id
+    @tag :git
+    test "creates a Git file system", %{conn: conn, team: team} do
+      id = Livebook.FileSystem.Utils.id("git", team.id, "git@github.com:livebook-dev/test.git")
+      file_system = build(:fs_git, id: id, hub_id: team.id)
 
-      :ok = Hubs.create_file_system(hub, file_system)
+      form_values =
+        Map.from_struct(file_system)
+        |> Map.take([:repo_url, :branch, :key])
+
+      attrs = %{file_system: form_values}
+
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
+      refute render(view) =~ file_system.id
+
+      view
+      |> element("#add-file-system")
+      |> render_click()
+
+      assert_patch(view, ~p"/hub/#{team.id}/file-systems/new")
+      assert render(view) =~ "Add file storage"
+
+      # change the file system type from S3 to git
+      view
+      |> element("#file_system_type-git")
+      |> render_click()
+
+      view
+      |> element("#file-systems-form")
+      |> render_change(attrs)
+
+      refute view
+             |> element("#file-systems-form button[disabled]")
+             |> has_element?()
+
+      view
+      |> element("#file-systems-form")
+      |> render_submit(attrs)
+
+      assert_receive {:file_system_created, %Livebook.FileSystem.Git{id: ^id} = file_system}
+      assert_receive {:file_system_mounted, ^file_system}, 10_000
+
+      assert_patch(view, "/hub/#{team.id}")
+      assert render(view) =~ "File storage added successfully"
+      assert render(element(view, "#hub-file-systems-list")) =~ file_system.id
+      assert file_system in Livebook.Hubs.get_file_systems(team)
+    end
+
+    test "updates existing S3 file system",
+         %{conn: conn, team: team, node: node, org_key: org_key} do
+      bypass = Bypass.open()
+
+      file_system = build_bypass_file_system(bypass, team.id)
+      id = TeamsRPC.create_file_system(node, team, org_key, file_system).id
       assert_receive {:file_system_created, %{id: ^id} = file_system}
 
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
-      attrs = %{file_system: Livebook.FileSystem.dump(file_system)}
+      form_values =
+        Map.from_struct(file_system)
+        |> Map.take([:bucket_url, :region, :access_key_id, :secret_access_key])
 
+      attrs = %{file_system: form_values}
       expect_s3_listing(bypass)
 
       view
       |> element("#hub-file-system-#{file_system.id}-edit")
       |> render_click(%{"file_system" => file_system})
 
-      assert_patch(view, ~p"/hub/#{hub.id}/file-systems/edit/#{file_system.id}")
+      assert_patch(view, ~p"/hub/#{team.id}/file-systems/edit/#{file_system.id}")
       assert render(view) =~ "Edit file storage"
 
       view
@@ -257,24 +313,82 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       |> element("#file-systems-form")
       |> render_submit(put_in(attrs.file_system.access_key_id, "new key"))
 
-      updated_file_system = %{file_system | access_key_id: "new key"}
-
-      assert_receive {:file_system_updated, ^updated_file_system}
-      assert_patch(view, "/hub/#{hub.id}")
+      assert_patch(view, "/hub/#{team.id}")
       assert render(view) =~ "File storage updated successfully"
+
+      updated_file_system = %{file_system | access_key_id: "new key"}
+      assert_receive {:file_system_updated, ^updated_file_system}
+
       assert render(element(view, "#hub-file-systems-list")) =~ file_system.bucket_url
-      assert updated_file_system in Livebook.Hubs.get_file_systems(hub)
+      assert updated_file_system in Livebook.Hubs.get_file_systems(team)
     end
 
-    test "detaches existing file system", %{conn: conn, hub: hub} do
-      bypass = Bypass.open()
-      file_system = build_bypass_file_system(bypass, hub.id)
-      id = file_system.id
+    @tag :git
+    test "updates existing Git file system",
+         %{conn: conn, team: team, node: node, org_key: org_key} do
+      file_system = TeamsRPC.create_file_system(node, team, org_key, build(:fs_git))
+      assert_receive {:file_system_created, %Livebook.FileSystem.Git{} = ^file_system}
+      assert_receive {:file_system_mounted, ^file_system}, 10_000
 
-      :ok = Hubs.create_file_system(hub, file_system)
+      # guarantee the branch is "main" and "file.txt" exists 
+      {:ok, paths} = Livebook.FileSystem.list(file_system, "/", false)
+      assert "/file.txt" in paths
+      refute "/another_file.txt" in paths
+
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
+
+      form_values =
+        Map.from_struct(file_system)
+        |> Map.take([:repo_url, :branch, :key])
+
+      attrs = %{file_system: form_values}
+      attrs = put_in(attrs.file_system.branch, "test")
+
+      view
+      |> element("#hub-file-system-#{file_system.id}-edit")
+      |> render_click(%{"file_system" => file_system})
+
+      assert_patch(view, ~p"/hub/#{team.id}/file-systems/edit/#{file_system.id}")
+      assert render(view) =~ "Edit file storage"
+      assert has_element?(view, "#file_system_type-git")
+
+      view
+      |> element("#file-systems-form")
+      |> render_change(attrs)
+
+      refute view
+             |> element("#file-systems-form button[disabled]")
+             |> has_element?()
+
+      refute view
+             |> element("#file-systems-form")
+             |> render_submit(attrs) =~ "Connection test failed"
+
+      assert_patch(view, "/hub/#{team.id}")
+      assert render(view) =~ "File storage updated successfully"
+
+      updated_file_system = %{file_system | branch: "test"}
+      assert_receive {:file_system_updated, ^updated_file_system}
+      assert_receive {:file_system_mounted, ^updated_file_system}, 10_000
+
+      assert render(element(view, "#hub-file-systems-list")) =~ file_system.id
+      assert updated_file_system in Livebook.Hubs.get_file_systems(team)
+
+      # guarantee the branch has changed and the repository is updated
+      {:ok, paths} = Livebook.FileSystem.list(updated_file_system, "/", false)
+      refute "/file.txt" in paths
+      assert "/another_file.txt" in paths
+    end
+
+    test "detaches existing S3 file system",
+         %{conn: conn, team: team, node: node, org_key: org_key} do
+      bypass = Bypass.open()
+
+      file_system = build_bypass_file_system(bypass, team.id)
+      id = TeamsRPC.create_file_system(node, team, org_key, file_system).id
       assert_receive {:file_system_created, %{id: ^id} = file_system}
 
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
       refute view
              |> element("#file-systems-form button[disabled]")
@@ -287,28 +401,67 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       render_confirm(view)
 
       assert_receive {:file_system_deleted, ^file_system}
-      assert_patch(view, "/hub/#{hub.id}")
+      assert_patch(view, "/hub/#{team.id}")
       assert render(view) =~ "File storage deleted successfully"
       refute render(element(view, "#hub-file-systems-list")) =~ file_system.bucket_url
-      refute file_system in Livebook.Hubs.get_file_systems(hub)
+      refute file_system in Livebook.Hubs.get_file_systems(team)
+    end
+
+    @tag :git
+    test "detaches existing Git file system",
+         %{conn: conn, team: team, node: node, org_key: org_key} do
+      file_system = TeamsRPC.create_file_system(node, team, org_key, build(:fs_git))
+      assert_receive {:file_system_created, %Livebook.FileSystem.Git{} = ^file_system}
+      assert_receive {:file_system_mounted, ^file_system}, 10_000
+
+      # guarantee the folder exists
+      repo_dir = Livebook.FileSystem.Git.git_dir(file_system)
+      assert File.exists?(repo_dir)
+
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
+
+      view
+      |> element("#hub-file-system-#{file_system.id}-detach", "Detach")
+      |> render_click()
+
+      render_confirm(view)
+
+      assert_receive {:file_system_deleted, ^file_system}
+      assert_receive {:file_system_unmounted, ^file_system}, 10_000
+
+      assert_patch(view, "/hub/#{team.id}")
+      assert render(view) =~ "File storage deleted successfully"
+      refute render(element(view, "#hub-file-systems-list")) =~ file_system.id
+      refute file_system in Livebook.Hubs.get_file_systems(team)
+
+      # guarantee the folder were deleted
+      refute File.exists?(repo_dir)
+    end
+
+    test "hides data if has version enforcement", %{conn: conn, team: team} do
+      # forces the min version enforcement
+      pid = Livebook.Hubs.TeamClient.get_pid(team.id)
+      :sys.replace_state(pid, &Map.replace(&1, :version_enforcement, "0.15.6"))
+
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
+
+      # hides the workspace data
+      refute has_element?(view, "#hub-secrets-list")
+      refute has_element?(view, "#hub-file-systems-list")
+      refute has_element?(view, "#add-deployment-group")
+
+      # but keep the general form and danger zone
+      assert has_element?(view, "#team-form")
+      assert has_element?(view, "#delete-hub")
     end
   end
 
   describe "agent" do
-    setup %{node: node} do
-      Livebook.Hubs.Broadcasts.subscribe([:crud, :connection])
-      {agent_key, org, deployment_group, hub} = create_agent_team_hub(node)
-      id = hub.id
+    @describetag teams_for: :agent
 
-      assert_receive {:hub_changed, ^id}
-      assert_receive {:hub_connected, ^id}
-
-      {:ok, hub: hub, agent_key: agent_key, org: org, deployment_group: deployment_group}
-    end
-
-    test "shows an error when creating a secret", %{conn: conn, hub: hub} do
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
-      secret = build(:secret, hub_id: hub.id)
+    test "shows an error when creating a secret", %{conn: conn, team: team} do
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
+      secret = build(:secret, hub_id: team.id)
 
       attrs = %{
         secret: %{
@@ -324,7 +477,7 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       |> element("#add-secret")
       |> render_click(%{})
 
-      assert_patch(view, ~p"/hub/#{hub.id}/secrets/new")
+      assert_patch(view, ~p"/hub/#{team.id}/secrets/new")
       assert render(view) =~ "Add secret"
 
       assert view
@@ -332,14 +485,14 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
              |> render_submit(attrs) =~
                "You are not authorized to perform this action, make sure you have the access and you are not in a Livebook App Server/Offline instance"
 
-      refute secret in Livebook.Hubs.get_secrets(hub)
+      refute secret in Livebook.Hubs.get_secrets(team)
     end
 
-    test "shows an error when creating a file system", %{conn: conn, hub: hub} do
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+    test "shows an error when creating a file system", %{conn: conn, team: team} do
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
       bypass = Bypass.open()
-      file_system = build_bypass_file_system(bypass, hub.id)
+      file_system = build_bypass_file_system(bypass, team.id)
       attrs = %{file_system: Livebook.FileSystem.dump(file_system)}
 
       expect_s3_listing(bypass)
@@ -349,7 +502,7 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
       |> element("#add-file-system")
       |> render_click(%{})
 
-      assert_patch(view, ~p"/hub/#{hub.id}/file-systems/new")
+      assert_patch(view, ~p"/hub/#{team.id}/file-systems/new")
       assert render(view) =~ "Add file storage"
 
       assert view
@@ -357,7 +510,7 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
              |> render_submit(attrs) =~
                "You are not authorized to perform this action, make sure you have the access and you are not in a Livebook App Server/Offline instance"
 
-      refute file_system in Livebook.Hubs.get_file_systems(hub)
+      refute file_system in Livebook.Hubs.get_file_systems(team)
     end
   end
 
@@ -377,20 +530,14 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
     # Not async, because we alter global config (default hub)
     use Livebook.TeamsIntegrationCase, async: false
 
-    setup %{user: user, node: node} do
-      Livebook.Hubs.Broadcasts.subscribe([:crud, :connection, :secrets, :file_systems])
-      Livebook.Teams.Broadcasts.subscribe([:clients])
-      hub = create_team_hub(user, node)
-      id = hub.id
+    @moduletag teams_for: :user
+    setup :teams
 
-      assert_receive {:hub_connected, ^id}
-      assert_receive {:client_connected, ^id}
+    @moduletag subscribe_to_hubs_topics: [:crud, :connection, :secrets, :file_systems]
+    @moduletag subscribe_to_teams_topics: [:clients]
 
-      {:ok, hub: hub}
-    end
-
-    test "marking and unmarking hub as default", %{conn: conn, hub: hub} do
-      {:ok, view, _html} = live(conn, ~p"/hub/#{hub.id}")
+    test "marking and unmarking hub as default", %{conn: conn, team: team} do
+      {:ok, view, _html} = live(conn, ~p"/hub/#{team.id}")
 
       view
       |> element("button", "Mark as default")
@@ -400,7 +547,7 @@ defmodule LivebookWeb.Integration.Hub.EditLiveTest do
              |> element("span", "Default")
              |> has_element?()
 
-      assert Hubs.get_default_hub().id == hub.id
+      assert Hubs.get_default_hub().id == team.id
 
       view
       |> element("button", "Remove as default")

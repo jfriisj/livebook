@@ -10,7 +10,7 @@ import {
   lineNumbers,
   highlightActiveLineGutter,
 } from "@codemirror/view";
-import { EditorState, EditorSelection } from "@codemirror/state";
+import { EditorState, EditorSelection, Compartment } from "@codemirror/state";
 import {
   indentOnInput,
   bracketMatching,
@@ -24,6 +24,7 @@ import { highlightSelectionMatches } from "@codemirror/search";
 import {
   autocompletion,
   closeBrackets,
+  moveCompletionSelection,
   snippetCompletion,
 } from "@codemirror/autocomplete";
 import { setDiagnostics } from "@codemirror/lint";
@@ -45,7 +46,7 @@ import { settingsStore } from "../../lib/settings";
 import Delta from "../../lib/delta";
 import Markdown from "../../lib/markdown";
 import { readOnlyHint } from "./live_editor/codemirror/read_only_hint";
-import { isMacOS, wait } from "../../lib/utils";
+import { isMacOS, wait, isSafari } from "../../lib/utils";
 import Emitter from "../../lib/emitter";
 import CollabClient from "./live_editor/collab_client";
 import { languages } from "./live_editor/codemirror/languages";
@@ -57,6 +58,7 @@ import { ancestorNode, closestNode } from "./live_editor/codemirror/tree_utils";
 import { selectingClass } from "./live_editor/codemirror/selecting_class";
 import { globalPubsub } from "../../lib/pubsub";
 import { hoverDetails } from "./live_editor/codemirror/hover_details";
+import { toggleWith } from "./live_editor/codemirror/toggle_with";
 
 /**
  * Mounts cell source editor with real-time collaboration mechanism.
@@ -236,6 +238,15 @@ export default class LiveEditor {
     this.deltaSubscription.destroy();
   }
 
+  setLanguage(language, intellisense) {
+    this.language = language;
+    this.intellisense = intellisense;
+
+    this.view.dispatch({
+      effects: this.languageCompartment.reconfigure(this.languageExtensions()),
+    });
+  }
+
   /**
    * Either adds or updates doctest indicators.
    */
@@ -322,21 +333,30 @@ export default class LiveEditor {
       },
     });
 
-    const lineWrappingEnabled =
-      this.language === "markdown" && settings.editor_markdown_word_wrap;
-
-    const language =
-      this.language &&
-      LanguageDescription.matchLanguageName(languages, this.language, false);
-
     const customKeymap = [
       { key: "Escape", run: exitMulticursor },
       { key: "Alt-Enter", run: insertBlankLineAndCloseHints },
+      { mac: "Ctrl-n", run: moveCompletionSelection(true) },
+      { mac: "Ctrl-p", run: moveCompletionSelection(false) },
+    ];
+
+    // The VSCode keymap handles these keys, but if already at the
+    // start/end of line/editor the command is not applied and the
+    // browser moves the page as per the default behaviour. This can
+    // be disruptive, so we add a catch-all for these keys and ignore
+    // them.
+    const ignoreKeymap = [
+      { key: "Home", run: () => true },
+      { key: "End", run: () => true },
+      { key: "PageUp", run: () => true },
+      { key: "PageDown", run: () => true },
     ];
 
     const selectionChangeListener = EditorView.updateListener.of((update) =>
       this.handleViewUpdate(update),
     );
+
+    this.languageCompartment = new Compartment();
 
     this.view = new EditorView({
       parent: this.container,
@@ -363,9 +383,9 @@ export default class LiveEditor {
         readOnlyHint(),
         keymap.of(customKeymap),
         keymap.of(vscodeKeymap),
+        keymap.of(ignoreKeymap),
         EditorState.tabSize.of(2),
         EditorState.lineSeparator.of("\n"),
-        lineWrappingEnabled ? EditorView.lineWrapping : [],
         // We bind tab to actions within the editor, which would trap
         // the user if they tabbed into the editor, so we remove it
         // from the tab navigation
@@ -379,19 +399,10 @@ export default class LiveEditor {
           activateOnTyping: settings.editor_auto_completion,
           defaultKeymap: false,
         }),
-        this.intellisense
-          ? [
-              autocompletion({ override: [this.completionSource.bind(this)] }),
-              hoverDetails(this.docsHoverTooltipSource.bind(this)),
-              signature(this.signatureSource.bind(this), {
-                activateOnTyping: settings.editor_auto_signature,
-              }),
-              formatter(this.formatterSource.bind(this)),
-            ]
-          : [],
         settings.editor_mode === "vim" ? [vim()] : [],
         settings.editor_mode === "emacs" ? [emacs()] : [],
-        language ? language.support : [],
+        this.languageCompartment.of(this.languageExtensions()),
+        toggleWith("Alt-z", EditorView.lineWrapping),
         EditorView.domEventHandlers({
           click: this.handleEditorClick.bind(this),
           keydown: this.handleEditorKeydown.bind(this),
@@ -402,6 +413,60 @@ export default class LiveEditor {
         selectionChangeListener,
       ],
     });
+
+    // In Safari, when a contenteditable element (here the editor) is
+    // blurred in favour of non-input element, typing something still
+    // targets the contenteditable element. This is a known bug [1],
+    // with a corresponding CodeMirror thread [2]. A workaround is to
+    // create and focus a temporary input, to properly remove focus
+    // from the contenteditable element.
+    //
+    // This is particularly annoying in our case, because the user may
+    // blur the editor and then use a letter shortcut, such as "n" for
+    // a new cell, which ends up typing in the editor.
+    //
+    // [1]: https://bugs.webkit.org/show_bug.cgi?id=112854
+    // [2]: https://discuss.codemirror.net/t/how-to-force-unfocus-of-the-codemirror-element-in-safari/8095
+    if (isSafari()) {
+      this.view.contentDOM.addEventListener("blur", (event) => {
+        const input = document.createElement("input");
+        input.style.cssText =
+          "width: 1px; height: 1px; border: none; margin: 0; padding: 0;";
+        input.tabIndex = -1;
+        this.view.contentDOM.appendChild(input);
+        input.focus();
+        input.setSelectionRange(0, 0);
+        input.blur();
+        input.remove();
+      });
+    }
+  }
+
+  /** @private */
+  languageExtensions() {
+    const settings = settingsStore.get();
+
+    const lineWrappingEnabled =
+      this.language === "markdown" && settings.editor_markdown_word_wrap;
+
+    const language =
+      this.language &&
+      LanguageDescription.matchLanguageName(languages, this.language, false);
+
+    return [
+      lineWrappingEnabled ? EditorView.lineWrapping : [],
+      language ? language.support : [],
+      this.intellisense
+        ? [
+            autocompletion({ override: [this.completionSource.bind(this)] }),
+            hoverDetails(this.docsHoverTooltipSource.bind(this)),
+            signature(this.signatureSource.bind(this), {
+              activateOnTyping: settings.editor_auto_signature,
+            }),
+            formatter(this.formatterSource.bind(this)),
+          ]
+        : [],
+    ];
   }
 
   /** @private */
@@ -457,7 +522,9 @@ export default class LiveEditor {
     const settings = settingsStore.get();
 
     // Trigger completion implicitly only for identifiers and members
-    const triggerBeforeCursor = context.matchBefore(/[\w?!.]$/);
+    const triggerBeforeCursor = context.matchBefore(
+      this.getTriggerBeforeCursorRegex(),
+    );
 
     if (!triggerBeforeCursor && !context.explicit) {
       return null;
@@ -495,6 +562,13 @@ export default class LiveEditor {
         };
       })
       .catch(() => null);
+  }
+
+  /** Get the regex for the trigger before cursor */
+  getTriggerBeforeCursorRegex() {
+    if (this.language === "elixir") return /[\w?!.]$/;
+    if (this.language === "erlang") return /[\w:]$/;
+    return /[\w.]$/;
   }
 
   /** @private */

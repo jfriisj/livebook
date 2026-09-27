@@ -1,7 +1,8 @@
 defmodule Livebook.Hubs do
   alias Livebook.FileSystem
   alias Livebook.Storage
-  alias Livebook.Hubs.{Broadcasts, Metadata, Personal, Provider, Team}
+  alias Livebook.Hubs
+  alias Livebook.Hubs.Provider
   alias Livebook.Secrets.Secret
 
   require Logger
@@ -28,7 +29,7 @@ defmodule Livebook.Hubs do
   @doc """
   Gets a list of metadata from storage.
   """
-  @spec get_metadata() :: list(Metadata.t())
+  @spec get_metadata() :: list(Hubs.Metadata.t())
   def get_metadata do
     for hub <- get_hubs() do
       Provider.to_metadata(hub)
@@ -74,7 +75,7 @@ defmodule Livebook.Hubs do
     attributes = Provider.dump(struct)
     :ok = connect_hub(struct)
     :ok = Storage.insert(@namespace, struct.id, Map.to_list(attributes))
-    :ok = Broadcasts.hub_changed(struct.id)
+    :ok = Hubs.Broadcasts.hub_changed(struct.id)
 
     struct
   end
@@ -88,7 +89,7 @@ defmodule Livebook.Hubs do
       true = Provider.type(hub) != "personal"
       :ok = maybe_unset_default_hub(hub.id)
       :ok = Storage.delete(@namespace, id)
-      :ok = Broadcasts.hub_deleted(hub.id)
+      :ok = Hubs.Broadcasts.hub_deleted(hub.id)
       :ok = disconnect_hub(hub)
     end
 
@@ -115,7 +116,7 @@ defmodule Livebook.Hubs do
          {:ok, hub} <- fetch_hub(id) do
       hub
     else
-      _ -> fetch_hub!(Personal.id())
+      _ -> fetch_hub!(Hubs.Personal.id())
     end
   end
 
@@ -126,25 +127,26 @@ defmodule Livebook.Hubs do
   defp disconnect_hub(hub) do
     # We use a task supervisor because the hub connection itself
     # calls delete_hub (which calls this function), otherwise we deadlock.
-    Task.Supervisor.start_child(Livebook.TaskSupervisor, fn ->
-      # Since other processes may have been communicating
-      # with the hub, we don't want to terminate abruptly and
-      # make them crash, so we give it some time to shut down.
-      #
-      # The default backoff is 5.5s, so we round it down to 5s.
-      Process.sleep(30_000)
-      :ok = Provider.disconnect(hub)
-    end)
+    {:ok, _pid} =
+      Task.Supervisor.start_child(Livebook.TaskSupervisor, fn ->
+        # Since other processes may have been communicating
+        # with the hub, we don't want to terminate abruptly and
+        # make them crash, so we give it some time to shut down.
+        #
+        # The default backoff is 5.5s, so we round it down to 5s.
+        Process.sleep(30_000)
+        :ok = Provider.disconnect(hub)
+      end)
 
     :ok
   end
 
   defp to_struct(%{id: "personal-" <> _} = fields) do
-    Provider.load(%Personal{}, fields)
+    Provider.load(%Hubs.Personal{}, fields)
   end
 
   defp to_struct(%{id: "team-" <> _} = fields) do
-    Provider.load(Team.new(), fields)
+    Provider.load(Hubs.Team.new(), fields)
   end
 
   @doc """
@@ -307,9 +309,10 @@ defmodule Livebook.Hubs do
   @doc """
   Gets a list of hub app specs.
   """
-  @spec get_app_specs() :: list(Livebook.AppSpec.t())
+  @spec get_app_specs() :: list(Livebook.Apps.AppSpec.t())
   def get_app_specs() do
     for hub <- get_hubs(),
+        Provider.connection_spec(hub),
         app_spec <- Provider.get_app_specs(hub),
         do: app_spec
   end

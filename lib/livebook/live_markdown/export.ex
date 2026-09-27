@@ -56,7 +56,7 @@ defmodule Livebook.LiveMarkdown.Export do
   end
 
   defp render_notebook(notebook, ctx) do
-    %{setup_section: %{cells: [setup_cell]}} = notebook
+    %{setup_section: %{cells: setup_cells}} = notebook
 
     comments =
       Enum.map(notebook.leading_comments, fn
@@ -65,13 +65,13 @@ defmodule Livebook.LiveMarkdown.Export do
       end)
 
     name = ["# ", notebook.name]
-    setup_cell = render_setup_cell(setup_cell, %{ctx | include_outputs?: false})
+    setup_cells = render_setup_cells(setup_cells, %{ctx | include_outputs?: false})
     sections = Enum.map(notebook.sections, &render_section(&1, notebook, ctx))
 
     metadata = notebook_metadata(notebook)
 
     notebook_with_metadata =
-      [name, setup_cell | sections]
+      [name | setup_cells ++ sections]
       |> Enum.reject(&is_nil/1)
       |> Enum.intersperse("\n\n")
       |> prepend_metadata(metadata)
@@ -113,7 +113,8 @@ defmodule Livebook.LiveMarkdown.Export do
       :auto_shutdown_ms,
       :access_type,
       :show_source,
-      :output_type
+      :output_type,
+      :app_folder_id
     ]
 
     put_unless_default(
@@ -175,8 +176,13 @@ defmodule Livebook.LiveMarkdown.Export do
     %{"branch_parent_index" => parent_idx}
   end
 
-  defp render_setup_cell(%{source: ""}, _ctx), do: nil
-  defp render_setup_cell(cell, ctx), do: render_cell(cell, ctx)
+  defp render_setup_cells([%{source: ""}], _ctx), do: []
+
+  defp render_setup_cells(cells, ctx) do
+    Enum.map(cells, fn cell ->
+      render_cell(cell, ctx)
+    end)
+  end
 
   defp render_cell(%Cell.Markdown{} = cell, _ctx) do
     metadata = cell_metadata(cell)
@@ -205,21 +211,32 @@ defmodule Livebook.LiveMarkdown.Export do
   end
 
   defp render_cell(%Cell.Smart{} = cell, ctx) do
+    metadata =
+      Map.merge(
+        cell_metadata(cell),
+        %{
+          livebook_object: "smart_cell",
+          kind: cell.kind,
+          # Attributes may include arbitrary values, including sequences
+          # like "-->" that would mess our format, so we always encode them
+          attrs: cell.attrs |> JSON.encode!(&encode_sorting/2) |> Base.encode64(padding: false),
+          chunks: cell.chunks && Enum.map(cell.chunks, &Tuple.to_list/1)
+        }
+      )
+
     %{Cell.Code.new() | source: cell.source, outputs: cell.outputs}
     |> render_cell(ctx)
-    |> prepend_metadata(%{
-      "livebook_object" => "smart_cell",
-      "kind" => cell.kind,
-      # Attributes may include arbitrary values, including sequences
-      # like "-->" that would mess our format, so we always encode them
-      "attrs" => cell.attrs |> JSON.encode!(&encode_sorting/2) |> Base.encode64(padding: false),
-      "chunks" => cell.chunks && Enum.map(cell.chunks, &Tuple.to_list/1)
-    })
+    |> prepend_metadata(metadata)
   end
 
   defp cell_metadata(%Cell.Code{} = cell) do
-    keys = [:reevaluate_automatically, :continue_on_error]
+    keys = [:reevaluate_automatically, :continue_on_error, :output_size]
     put_unless_default(%{}, Map.take(cell, keys), Map.take(Cell.Code.new(), keys))
+  end
+
+  defp cell_metadata(%Cell.Smart{} = cell) do
+    keys = [:output_size]
+    put_unless_default(%{}, Map.take(cell, keys), Map.take(Cell.Smart.new(), keys))
   end
 
   defp cell_metadata(_cell), do: %{}
@@ -233,12 +250,11 @@ defmodule Livebook.LiveMarkdown.Export do
   end
 
   defp render_output(%{type: :terminal_text, text: text}, _ctx) do
-    text = String.replace_suffix(text, "\n", "")
-    delimiter = MarkdownHelpers.code_block_delimiter(text)
-    text = strip_ansi(text)
+    render_text_output(text)
+  end
 
-    [delimiter, "\n", text, "\n", delimiter]
-    |> prepend_metadata(%{output: true})
+  defp render_output(%{type: :error, message: message}, _ctx) do
+    render_text_output(message)
   end
 
   defp render_output(%{type: :js, js_view: %{ref: ref}}, ctx) do
@@ -273,6 +289,14 @@ defmodule Livebook.LiveMarkdown.Export do
   end
 
   defp render_output(_output, _ctx), do: :ignored
+
+  defp render_text_output(text) do
+    text = text |> strip_ansi() |> String.replace_suffix("\n", "")
+    delimiter = MarkdownHelpers.code_block_delimiter(text)
+
+    [delimiter, "\n", text, "\n", delimiter]
+    |> prepend_metadata(%{output: true})
+  end
 
   defp encode_js_data(data) when is_binary(data), do: {:ok, data}
 
@@ -322,7 +346,7 @@ defmodule Livebook.LiveMarkdown.Export do
   defp add_markdown_annotation_before_elixir_block(ast) do
     Enum.flat_map(ast, fn
       {"pre", _, [{"code", [{"class", language}], [_source], %{}}], %{}} = ast_node
-      when language in ["elixir", "erlang"] ->
+      when language in ["elixir", "erlang", "python", "pyproject.toml"] ->
         [{:comment, [], [~s/livebook:{"force_markdown":true}/], %{comment: true}}, ast_node]
 
       ast_node ->
@@ -344,7 +368,7 @@ defmodule Livebook.LiveMarkdown.Export do
     string
     |> Livebook.Utils.ANSI.parse_ansi_string()
     |> elem(0)
-    |> Enum.map(fn {_modifiers, string} -> string end)
+    |> Enum.map_join(fn {_modifiers, string} -> string end)
   end
 
   defp render_notebook_footer(_notebook, _notebook_source, _include_stamp? = false), do: {[], []}
@@ -377,7 +401,11 @@ defmodule Livebook.LiveMarkdown.Export do
     end
   end
 
-  defp notebook_stamp_metadata(notebook) do
+  @doc """
+  Returns metadata map to be stored encrypted in notebook stamp.
+  """
+  @spec notebook_stamp_metadata(Notebook.t()) :: map()
+  def notebook_stamp_metadata(notebook) do
     keys = [:hub_secret_names]
 
     metadata = put_unless_default(%{}, Map.take(notebook, keys), Map.take(Notebook.new(), keys))

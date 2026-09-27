@@ -1,5 +1,5 @@
 defmodule Livebook.Teams.Broadcasts do
-  alias Livebook.Teams.{Agent, AppDeployment, DeploymentGroup}
+  alias Livebook.Teams
 
   @type broadcast :: :ok | {:error, term()}
 
@@ -7,6 +7,8 @@ defmodule Livebook.Teams.Broadcasts do
   @app_deployments_topic "teams:app_deployments"
   @clients_topic "teams:clients"
   @deployment_groups_topic "teams:deployment_groups"
+  @app_folders_topic "teams:app_folders"
+  @app_server_topic "teams:app_server"
 
   @doc """
   Subscribes to one or more subtopics in `"teams"`.
@@ -22,16 +24,31 @@ defmodule Livebook.Teams.Broadcasts do
 
     * `{:app_deployment_started, AppDeployment.t()}`
     * `{:app_deployment_stopped, AppDeployment.t()}`
+    * `{:app_deployment_updated, AppDeployment.t()}`
 
   Topic `#{@clients_topic}`:
 
     * `{:client_connected, id}`
+    * `{:notification_sent, Notification.t()}`
+    * `{:notification_updated, Notification.t()}`
+    * `{:notification_deleted, Notification.t()}`
 
   Topic `#{@deployment_groups_topic}`:
 
     * `{:deployment_group_created, DeploymentGroup.t()}`
-    * `{:deployment_group_update, DeploymentGroup.t()}`
+    * `{:deployment_group_updated, DeploymentGroup.t()}`
     * `{:deployment_group_deleted, DeploymentGroup.t()}`
+    * `{:deployment_users_updated, DeploymentGroup.t()}`
+
+  Topic `#{@app_server_topic}`:
+
+    * `{:server_authorization_updated, DeploymentGroup.t()}`
+
+  Topic `#{@app_folders_topic}`:
+
+    * `{:app_folder_created, AppFolder.t()}`
+    * `{:app_folder_updated, AppFolder.t()}`
+    * `{:app_folder_deleted, AppFolder.t()}`
 
   """
   @spec subscribe(atom() | list(atom())) :: :ok | {:error, term()}
@@ -46,21 +63,7 @@ defmodule Livebook.Teams.Broadcasts do
   end
 
   @doc """
-  Unsubscribes from `subscribe/0`.
-  """
-  @spec unsubscribe(atom() | list(atom())) :: :ok
-  def unsubscribe(topics) when is_list(topics) do
-    for topic <- topics, do: unsubscribe(topic)
-
-    :ok
-  end
-
-  def unsubscribe(topic) do
-    Phoenix.PubSub.unsubscribe(Livebook.PubSub, "teams:#{topic}")
-  end
-
-  @doc """
-  Broadcasts under `#{@clients_topic}` topic when hub received a new client connection.
+  Broadcasts under `#{@clients_topic}` topic when hub dispatches events from connection event.
   """
   @spec client_connected(String.t()) :: broadcast()
   def client_connected(id) do
@@ -68,59 +71,131 @@ defmodule Livebook.Teams.Broadcasts do
   end
 
   @doc """
+  Broadcasts under `#{@clients_topic}` topic when hub receives a notification.
+  """
+  @spec notification_sent(Teams.Notification.t()) :: broadcast()
+  def notification_sent(%Teams.Notification{} = notification) do
+    broadcast(@clients_topic, {:notification_sent, notification})
+  end
+
+  @doc """
+  Broadcasts under `#{@clients_topic}` topic when hub receives an updated notification.
+  """
+  @spec notification_updated(Teams.Notification.t()) :: broadcast()
+  def notification_updated(%Teams.Notification{} = notification) do
+    broadcast(@clients_topic, {:notification_updated, notification})
+  end
+
+  @doc """
+  Broadcasts under `#{@clients_topic}` topic when hub receives a deleted notification.
+  """
+  @spec notification_deleted(Teams.Notification.t()) :: broadcast()
+  def notification_deleted(%Teams.Notification{} = notification) do
+    broadcast(@clients_topic, {:notification_deleted, notification})
+  end
+
+  @doc """
   Broadcasts under `#{@deployment_groups_topic}` topic when hub received a new deployment group.
   """
-  @spec deployment_group_created(DeploymentGroup.t()) :: broadcast()
-  def deployment_group_created(%DeploymentGroup{} = deployment_group) do
+  @spec deployment_group_created(Teams.DeploymentGroup.t()) :: broadcast()
+  def deployment_group_created(%Teams.DeploymentGroup{} = deployment_group) do
     broadcast(@deployment_groups_topic, {:deployment_group_created, deployment_group})
   end
 
   @doc """
   Broadcasts under `#{@deployment_groups_topic}` topic when hub received an updated deployment group.
   """
-  @spec deployment_group_updated(DeploymentGroup.t()) :: broadcast()
-  def deployment_group_updated(%DeploymentGroup{} = deployment_group) do
+  @spec deployment_group_updated(Teams.DeploymentGroup.t()) :: broadcast()
+  def deployment_group_updated(%Teams.DeploymentGroup{} = deployment_group) do
     broadcast(@deployment_groups_topic, {:deployment_group_updated, deployment_group})
   end
 
   @doc """
   Broadcasts under `#{@deployment_groups_topic}` topic when hub received a deleted deployment group.
   """
-  @spec deployment_group_deleted(DeploymentGroup.t()) :: broadcast()
-  def deployment_group_deleted(%DeploymentGroup{} = deployment_group) do
+  @spec deployment_group_deleted(Teams.DeploymentGroup.t()) :: broadcast()
+  def deployment_group_deleted(%Teams.DeploymentGroup{} = deployment_group) do
     broadcast(@deployment_groups_topic, {:deployment_group_deleted, deployment_group})
+  end
+
+  @doc """
+  Broadcasts under `#{@deployment_groups_topic}` topic when hub received an updated deployment group that changed which users have access to deploy apps.
+  """
+  @spec deployment_users_updated(Teams.DeploymentGroup.t()) :: broadcast()
+  def deployment_users_updated(%Teams.DeploymentGroup{} = deployment_group) do
+    broadcast(@deployment_groups_topic, {:deployment_users_updated, deployment_group})
   end
 
   @doc """
   Broadcasts under `#{@app_deployments_topic}` topic when hub received to start a new app deployment.
   """
-  @spec app_deployment_started(AppDeployment.t()) :: broadcast()
-  def app_deployment_started(%AppDeployment{} = app_deployment) do
+  @spec app_deployment_started(Teams.AppDeployment.t()) :: broadcast()
+  def app_deployment_started(%Teams.AppDeployment{} = app_deployment) do
     broadcast(@app_deployments_topic, {:app_deployment_started, app_deployment})
   end
 
   @doc """
   Broadcasts under `#{@app_deployments_topic}` topic when hub received to stop an app deployment.
   """
-  @spec app_deployment_stopped(AppDeployment.t()) :: broadcast()
-  def app_deployment_stopped(%AppDeployment{} = app_deployment) do
+  @spec app_deployment_stopped(Teams.AppDeployment.t()) :: broadcast()
+  def app_deployment_stopped(%Teams.AppDeployment{} = app_deployment) do
     broadcast(@app_deployments_topic, {:app_deployment_stopped, app_deployment})
+  end
+
+  @doc """
+  Broadcasts under `#{@app_deployments_topic}` topic when hub received an updated app deployment.
+  """
+  @spec app_deployment_updated(Teams.AppDeployment.t()) :: broadcast()
+  def app_deployment_updated(%Teams.AppDeployment{} = app_deployment) do
+    broadcast(@app_deployments_topic, {:app_deployment_updated, app_deployment})
   end
 
   @doc """
   Broadcasts under `#{@agents_topic}` topic when hub received a new agent.
   """
-  @spec agent_joined(Agent.t()) :: broadcast()
-  def agent_joined(%Agent{} = agent) do
+  @spec agent_joined(Teams.Agent.t()) :: broadcast()
+  def agent_joined(%Teams.Agent{} = agent) do
     broadcast(@agents_topic, {:agent_joined, agent})
   end
 
   @doc """
   Broadcasts under `#{@agents_topic}` topic when hub received a deleted agent.
   """
-  @spec agent_left(Agent.t()) :: broadcast()
-  def agent_left(%Agent{} = agent) do
+  @spec agent_left(Teams.Agent.t()) :: broadcast()
+  def agent_left(%Teams.Agent{} = agent) do
     broadcast(@agents_topic, {:agent_left, agent})
+  end
+
+  @doc """
+  Broadcasts under `#{@app_server_topic}` topic when hub received an updated deployment group that changed which groups have access to the server.
+  """
+  @spec server_authorization_updated(Teams.DeploymentGroup.t()) :: broadcast()
+  def server_authorization_updated(%Teams.DeploymentGroup{} = deployment_group) do
+    broadcast(@app_server_topic, {:server_authorization_updated, deployment_group})
+  end
+
+  @doc """
+  Broadcasts under `#{@app_folders_topic}` topic when hub received a new app folder.
+  """
+  @spec app_folder_created(Teams.AppFolder.t()) :: broadcast()
+  def app_folder_created(%Teams.AppFolder{} = app_folder) do
+    broadcast(@app_folders_topic, {:app_folder_created, app_folder})
+  end
+
+  @doc """
+  Broadcasts under `#{@app_folders_topic}` topic when hub received an updated app folder.
+  """
+  @spec app_folder_updated(Teams.AppFolder.t()) :: broadcast()
+  def app_folder_updated(%Teams.AppFolder{} = app_folder) do
+    broadcast(@app_folders_topic, {:app_folder_updated, app_folder})
+  end
+
+  @doc """
+  Broadcasts under `#{@app_folders_topic}` topic when hub received a deleted app folder.
+  """
+  @spec app_folder_deleted(Teams.AppFolder.t()) :: broadcast()
+  def app_folder_deleted(%Teams.AppFolder{} = app_folder) do
+    broadcast(@app_folders_topic, {:app_folder_deleted, app_folder})
   end
 
   defp broadcast(topic, message) do

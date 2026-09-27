@@ -12,11 +12,15 @@ defmodule Livebook.Users.User do
 
   alias Livebook.Utils
 
+  @type access_type :: :full | :apps
+
   @type t :: %__MODULE__{
           id: id(),
           name: String.t() | nil,
           email: String.t() | nil,
           avatar_url: String.t() | nil,
+          access_type: access_type(),
+          groups: list(map()) | nil,
           payload: map() | nil,
           hex_color: hex_color()
         }
@@ -28,6 +32,8 @@ defmodule Livebook.Users.User do
     field :name, :string
     field :email, :string
     field :avatar_url, :string
+    field :access_type, Ecto.Enum, values: ~w[full apps]a, default: :full
+    field :groups, {:array, :map}, default: []
     field :payload, :map
     field :hex_color, Livebook.EctoTypes.HexColor
   end
@@ -42,14 +48,17 @@ defmodule Livebook.Users.User do
       name: nil,
       email: nil,
       avatar_url: nil,
+      access_type: :full,
+      groups: [],
       payload: nil,
       hex_color: Livebook.EctoTypes.HexColor.random()
     }
   end
 
+  @doc false
   def changeset(user, attrs \\ %{}) do
     user
-    |> cast(attrs, [:name, :email, :avatar_url, :hex_color, :payload])
+    |> cast(attrs, [:name, :email, :avatar_url, :access_type, :groups, :hex_color, :payload])
     |> validate_required([:hex_color])
   end
 end

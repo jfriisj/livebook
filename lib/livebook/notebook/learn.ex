@@ -56,17 +56,10 @@ defmodule Livebook.Notebook.Learn do
       }
     },
     %{
-      path: Path.join(__DIR__, "learn/deploy_apps.livemd"),
+      path: Path.join(__DIR__, "learn/chat_app.livemd"),
       details: %{
         description: "Write and deploy a chat app with Kino control and frames.",
         cover_filename: "learn-deploy.svg"
-      }
-    },
-    %{
-      path: Path.join(__DIR__, "learn/intro_to_explorer.livemd"),
-      details: %{
-        description: "Intuitive data visualizations and data pipelines on the fly.",
-        cover_filename: "explorer.png"
       }
     },
     %{
@@ -81,6 +74,20 @@ defmodule Livebook.Notebook.Learn do
       details: %{
         description: "Seamlessly plot maps using geospatial and tabular data.",
         cover_filename: "maplibre.png"
+      }
+    },
+    %{
+      path: Path.join(__DIR__, "learn/github_stars.livemd"),
+      details: %{
+        description: "Build a Livebook app to visualize GitHub repository star growth over time.",
+        cover_filename: "github-stars.png"
+      }
+    },
+    %{
+      path: Path.join(__DIR__, "learn/intro_to_python.livemd"),
+      details: %{
+        description: "Learn how to use Python in your Livebook notebooks.",
+        cover_filename: "python.svg"
       }
     },
     %{

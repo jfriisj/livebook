@@ -12,7 +12,11 @@ defmodule LivebookWeb.AuthPlug do
   @impl true
   def call(conn, _opts) do
     if authenticated?(conn) do
-      conn
+      if not authorized?(conn) do
+        render_unauthorized(conn)
+      else
+        conn
+      end
     else
       authenticate(conn)
     end
@@ -36,11 +40,7 @@ defmodule LivebookWeb.AuthPlug do
     authenticated?(get_session(conn), conn.port)
   end
 
-  @doc """
-  Checks if the given session is authenticated.
-  """
-  @spec authenticated?(map(), non_neg_integer()) :: boolean()
-  def authenticated?(session, port) do
+  defp authenticated?(session, port) do
     case authentication(session) do
       %{mode: :disabled} ->
         true
@@ -49,6 +49,35 @@ defmodule LivebookWeb.AuthPlug do
         secret_hash = session[key(port, mode)]
         is_binary(secret_hash) and matches_secret?(secret_hash, secret)
     end
+  end
+
+  @doc """
+  Checks if given connection or session is authorized.
+  """
+  @spec authorized?(Plug.Conn.t()) :: boolean()
+  def authorized?(%Plug.Conn{} = conn) do
+    # Note that if the user has access restricted to specific app pages,
+    # they are not authorized and have no access to any pages guarded
+    # by this plug.
+    authenticated?(conn) and
+      LivebookWeb.UserPlug.build_current_user(
+        get_session(conn),
+        conn.assigns.identity_data,
+        conn.assigns.user_data
+      ).access_type == :full
+  end
+
+  @doc """
+  Checks if the given session is authorized.
+  """
+  @spec authorized?(map(), non_neg_integer()) :: boolean()
+  def authorized?(%{} = session, port) do
+    authenticated?(session, port) and
+      LivebookWeb.UserPlug.build_current_user(
+        session,
+        session["identity_data"],
+        session["user_data"]
+      ).access_type == :full
   end
 
   defp authenticate(conn) do
@@ -78,7 +107,7 @@ defmodule LivebookWeb.AuthPlug do
   defp redirect_to_authenticate(%{path_info: []} = conn) do
     path =
       if Livebook.Apps.list_apps() != [] or Livebook.Config.apps_path() != nil or
-           Livebook.Config.teams_auth?() do
+           teams_auth(conn) != nil do
         ~p"/apps"
       else
         ~p"/authenticate"
@@ -99,6 +128,19 @@ defmodule LivebookWeb.AuthPlug do
     |> halt()
   end
 
+  defp render_unauthorized(%{path_info: []} = conn) do
+    conn |> redirect(to: ~p"/apps") |> halt()
+  end
+
+  defp render_unauthorized(conn) do
+    conn
+    |> put_status(:unauthorized)
+    |> put_view(LivebookWeb.ErrorHTML)
+    |> put_root_layout(false)
+    |> render("401.html", %{details: "You don't have permission to access this server"})
+    |> halt()
+  end
+
   defp path_with_query(path, params) when params == %{}, do: path
   defp path_with_query(path, params), do: path <> "?" <> URI.encode_query(params)
 
@@ -112,6 +154,7 @@ defmodule LivebookWeb.AuthPlug do
   This mirrors `Livebook.Config.authentication/0`, except the it can
   be overridden in tests, for each connection.
   """
+  @spec authentication(Plug.Conn.t() | map()) :: Livebook.Config.authentication()
   if Mix.env() == :test do
     def authentication(%Plug.Conn{} = conn), do: authentication(get_session(conn))
 
@@ -120,5 +163,27 @@ defmodule LivebookWeb.AuthPlug do
     end
   else
     def authentication(_), do: Livebook.Config.authentication()
+  end
+
+  @doc """
+  Returns the kind of Teams authentication configuration for the given `conn` or
+  `session`.
+
+  This mirrors `Livebook.Config.teams_auth/0`, except the it can
+  be overridden in tests, for each connection.
+  """
+  @spec teams_auth(Plug.Conn.t() | map()) :: :online | :offline | nil
+  if Mix.env() == :test do
+    def teams_auth(%Plug.Conn{} = conn) do
+      conn |> get_session() |> teams_auth()
+    end
+
+    def teams_auth(%{} = session) do
+      session["teams_auth_test_override"] || Livebook.Config.teams_auth()
+    end
+  else
+    def teams_auth(_) do
+      Livebook.Config.teams_auth()
+    end
   end
 end

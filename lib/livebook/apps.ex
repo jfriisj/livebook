@@ -7,6 +7,7 @@ defmodule Livebook.Apps do
   require Logger
 
   alias Livebook.App
+  alias Livebook.Apps
 
   @doc """
   Returns app process pid for the given slug.
@@ -61,6 +62,35 @@ defmodule Livebook.Apps do
   def list_apps() do
     Livebook.Tracker.list_apps()
   end
+
+  @doc """
+  Returns all the running apps authorized to given user.
+  """
+  @spec list_authorized_apps(Livebook.Users.User.t()) :: list(App.t())
+  def list_authorized_apps(user) do
+    for app <- list_apps(),
+        authorized?(app, user) do
+      app
+    end
+  end
+
+  @doc """
+  Returns if the given running app is authorized to given user.
+
+  Teams apps have authorization rules that can restrict access on
+  per-user basis. This kind of authorization is not applicable to
+  other types of apps, for those this function always returns `true`.
+  """
+  @spec authorized?(App.t(), Livebook.Users.User.t()) :: boolean()
+  def authorized?(app, user)
+
+  def authorized?(_app, %{access_type: :full}), do: true
+
+  def authorized?(%{slug: slug, app_spec: %Apps.TeamsAppSpec{hub_id: id}}, user) do
+    Livebook.Hubs.TeamClient.user_app_access?(id, user.groups, slug)
+  end
+
+  def authorized?(_app, _user), do: true
 
   @doc """
   Updates the given app info across the cluster.

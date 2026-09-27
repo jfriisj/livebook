@@ -50,20 +50,6 @@ defmodule Livebook.Hubs.Broadcasts do
   end
 
   @doc """
-  Unsubscribes from `subscribe/0`.
-  """
-  @spec unsubscribe(atom() | list(atom())) :: :ok
-  def unsubscribe(topics) when is_list(topics) do
-    for topic <- topics, do: unsubscribe(topic)
-
-    :ok
-  end
-
-  def unsubscribe(topic) do
-    Phoenix.PubSub.unsubscribe(Livebook.PubSub, "hubs:#{topic}")
-  end
-
-  @doc """
   Broadcasts under `#{@crud_topic}` topic when hubs changed.
   """
   @spec hub_changed(String.t()) :: broadcast()
@@ -127,7 +113,7 @@ defmodule Livebook.Hubs.Broadcasts do
     broadcast(@secrets_topic, {:secret_deleted, secret})
   end
 
-  @allowed_file_systems [FileSystem.S3]
+  @allowed_file_systems [FileSystem.S3, FileSystem.Git]
 
   @doc """
   Broadcasts under `#{@file_systems_topic}` topic when hub received a new file system.

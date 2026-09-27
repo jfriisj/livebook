@@ -7,10 +7,11 @@ FROM ${BASE_IMAGE} AS base-default
 
 FROM ${BASE_IMAGE} AS base-cuda
 
-ARG CUDA_VERSION
+ARG CUDA_VERSION_MAJOR
+ARG CUDA_VERSION_MINOR
 
 RUN distro="ubuntu$(. /etc/lsb-release; echo "$DISTRIB_RELEASE" | tr -d '.')" && \
-  # Official Docker images use the sbsa packages when targetting arm64.
+  # Official Docker images use the sbsa packages when targeting arm64.
   # See https://gitlab.com/nvidia/container-images/cuda/-/blob/85f465ea3343a2d7f7753a0a838701999ed58a01/dist/12.5.1/ubuntu2204/base/Dockerfile#L12
   arch="$(if [ "$(uname -m)" = "aarch64" ]; then echo "sbsa"; else echo "x86_64"; fi)" && \
   apt-get update && apt-get install -y ca-certificates wget && \
@@ -20,8 +21,7 @@ RUN distro="ubuntu$(. /etc/lsb-release; echo "$DISTRIB_RELEASE" | tr -d '.')" &&
   # the CUDA toolkit that is required by Elixir numerical packages
   # (nvcc and runtime libraries). Note that we do not need to install
   # the driver, it is already provided by NVIDIA Container Toolkit.
-  cuda_version="${CUDA_VERSION}" && cuda_major="${cuda_version%-*}" && \
-  apt-get install -y git cuda-nvcc-${CUDA_VERSION} cuda-libraries-${CUDA_VERSION} libcudnn9-cuda-$cuda_major && \
+  apt-get install -y git cuda-nvcc-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} cuda-libraries-${CUDA_VERSION_MAJOR}-${CUDA_VERSION_MINOR} libcudnn9-cuda-${CUDA_VERSION_MAJOR} libnccl2=*+cuda${CUDA_VERSION_MAJOR}.${CUDA_VERSION_MINOR} && \
   apt-get clean -y && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/usr/local/nvidia/bin:/usr/local/cuda/bin:$PATH"
@@ -57,15 +57,15 @@ COPY config config
 RUN mix do deps.get, deps.compile
 
 # Compile and build the release
-COPY priv/.gitkeep priv/.gitkeep
 COPY rel rel
-COPY static static
+COPY priv/.gitkeep priv/.gitkeep
 COPY iframe/priv/static/iframe iframe/priv/static/iframe
 COPY proto proto
+COPY assets assets
 COPY lib lib
 # We need README.md during compilation (look for @external_resource "README.md")
 COPY README.md README.md
-RUN mix do compile, release livebook
+RUN mix do compile + assets.setup + release livebook
 
 # Final stage: prepares the runtime environment and copies over the release.
 #
@@ -83,6 +83,8 @@ RUN apt-get update && apt-get upgrade -y && \
     build-essential ca-certificates libncurses5-dev \
     # In case someone uses `Mix.install/2` and point to a git repo
     git \
+    # In case someone uses the Git file storage
+    openssh-client \
     # Additional standard tools
     wget \
     # In case someone uses Torchx for Nx
@@ -104,7 +106,7 @@ RUN mix local.hex --force && \
 
 # By default Livebook binds to loopback, but in order to make the app
 # accessible outside of the container (by binding ports), we need to
-# bind to any address. Also note that we specify IPv6 address, becuase
+# bind to any address. Also note that we specify IPv6 address, because
 # we want to accept IPv6 connections. This is actually the default in
 # usual Phoenix deployments.
 ENV LIVEBOOK_IP="::"

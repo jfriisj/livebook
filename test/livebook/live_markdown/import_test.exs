@@ -21,7 +21,7 @@ defmodule Livebook.LiveMarkdown.ImportTest do
 
     $x_{i} + y_{i}$
 
-    <!-- livebook:{"continue_on_error":true,"reevaluate_automatically":true} -->
+    <!-- livebook:{"continue_on_error":true,"output_size":"wide","reevaluate_automatically":true} -->
 
     ```elixir
     Enum.to_list(1..10)
@@ -43,7 +43,7 @@ defmodule Livebook.LiveMarkdown.ImportTest do
     Process.info()
     ```
 
-    <!-- livebook:{"attrs":"eyJ0ZXh0IjoiTXkgdGV4dCJ9","livebook_object":"smart_cell","kind":"text"} -->
+    <!-- livebook:{"attrs":"eyJ0ZXh0IjoiTXkgdGV4dCJ9","livebook_object":"smart_cell","kind":"text","output_size":"full"} -->
 
     ```elixir
     IO.puts("My text")
@@ -59,6 +59,10 @@ defmodule Livebook.LiveMarkdown.ImportTest do
 
     ```erlang
     lists:seq(1, 10).
+    ```
+
+    ```python
+    range(0, 10)
     ```
     """
 
@@ -88,7 +92,8 @@ defmodule Livebook.LiveMarkdown.ImportTest do
                      continue_on_error: true,
                      source: """
                      Enum.to_list(1..10)\
-                     """
+                     """,
+                     output_size: :wide
                    },
                    %Cell.Markdown{
                      source: """
@@ -122,6 +127,7 @@ defmodule Livebook.LiveMarkdown.ImportTest do
                      IO.puts("My text")\
                      """,
                      attrs: %{"text" => "My text"},
+                     output_size: :full,
                      kind: "text"
                    },
                    %Cell.Smart{
@@ -138,6 +144,12 @@ defmodule Livebook.LiveMarkdown.ImportTest do
                      language: :erlang,
                      source: """
                      lists:seq(1, 10).\
+                     """
+                   },
+                   %Cell.Code{
+                     language: :python,
+                     source: """
+                     range(0, 10)\
                      """
                    }
                  ]
@@ -775,7 +787,7 @@ defmodule Livebook.LiveMarkdown.ImportTest do
   describe "app settings" do
     test "imports settings" do
       markdown = """
-      <!-- livebook:{"app_settings":{"access_type":"public","auto_shutdown_ms":5000,"multi_session":true,"output_type":"rich","show_existing_sessions":false,"show_source":true,"slug":"app"}} -->
+      <!-- livebook:{"app_settings":{"access_type":"public","app_folder_id":"123","auto_shutdown_ms":5000,"multi_session":true,"output_type":"rich","show_existing_sessions":false,"show_source":true,"slug":"app"}} -->
 
       # My Notebook
       """
@@ -792,7 +804,8 @@ defmodule Livebook.LiveMarkdown.ImportTest do
                  auto_shutdown_ms: 5_000,
                  access_type: :public,
                  show_source: true,
-                 output_type: :rich
+                 output_type: :rich,
+                 app_folder_id: "123"
                }
              } = notebook
     end
@@ -1140,6 +1153,56 @@ defmodule Livebook.LiveMarkdown.ImportTest do
                sections: []
              } = notebook
     end
+
+    test "imports pyproject setup cell" do
+      markdown = """
+      # My Notebook
+
+      ```elixir
+      Mix.install([
+        {:pythonx, "~> 0.4.2"}
+      ])
+      ```
+
+      ```pyproject.toml
+      [project]
+      name = "project"
+      version = "0.0.0"
+      requires-python = "==3.13.*"
+      dependencies = []
+      ```
+      """
+
+      {notebook, %{warnings: []}} = Import.notebook_from_livemd(markdown)
+
+      assert %Notebook{
+               name: "My Notebook",
+               setup_section: %{
+                 cells: [
+                   %Cell.Code{
+                     id: "setup",
+                     source: """
+                     Mix.install([
+                       {:pythonx, "~> 0.4.2"}
+                     ])\
+                     """
+                   },
+                   %Cell.Code{
+                     id: "setup-pyproject.toml",
+                     language: :"pyproject.toml",
+                     source: """
+                     [project]
+                     name = "project"
+                     version = "0.0.0"
+                     requires-python = "==3.13.*"
+                     dependencies = []\
+                     """
+                   }
+                 ]
+               },
+               sections: []
+             } = notebook
+    end
   end
 
   describe "notebook stamp" do
@@ -1448,6 +1511,45 @@ defmodule Livebook.LiveMarkdown.ImportTest do
              } = notebook
 
       assert notebook.quarantine_file_entry_names == MapSet.new(["document1.pdf"])
+    end
+
+    test "discards file entries with path traversal in the name" do
+      markdown = """
+      <!-- livebook:{"file_entries":[{"name":"image.jpg","type":"attachment"},{"name":"../secret.txt","type":"attachment"},{"file":{"file_system_id":"local","file_system_type":"local","path":"#{p("/document.pdf")}"},"name":"foo/bar.png","type":"file"},{"name":"../../tmp/payload.txt","type":"url","url":"https://example.com/payload.txt"}]} -->
+
+      # My Notebook
+      """
+
+      {notebook, %{warnings: warnings}} = Import.notebook_from_livemd(markdown)
+
+      assert %Notebook{file_entries: [%{type: :attachment, name: "image.jpg"}]} = notebook
+
+      assert notebook.quarantine_file_entry_names == MapSet.new()
+
+      assert warnings == [
+               ~s{discarding file entry with invalid name: "../../tmp/payload.txt"},
+               ~s{discarding file entry with invalid name: "foo/bar.png"},
+               ~s{discarding file entry with invalid name: "../secret.txt"}
+             ]
+    end
+
+    test "discards file entries with otherwise invalid name" do
+      markdown = """
+      <!-- livebook:{"file_entries":[{"name":"..","type":"attachment"},{"name":"document","type":"attachment"},{"name":"","type":"attachment"},{"name":42,"type":"attachment"}]} -->
+
+      # My Notebook
+      """
+
+      {notebook, %{warnings: warnings}} = Import.notebook_from_livemd(markdown)
+
+      assert %Notebook{file_entries: []} = notebook
+
+      assert warnings == [
+               "discarding file entry in invalid format",
+               ~s{discarding file entry with invalid name: ""},
+               ~s{discarding file entry with invalid name: "document"},
+               ~s{discarding file entry with invalid name: ".."}
+             ]
     end
   end
 end

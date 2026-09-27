@@ -1,16 +1,21 @@
 defmodule LivebookWeb.SessionLive.PersistenceComponent do
   use LivebookWeb, :live_component
 
-  alias Livebook.{Sessions, Session, LiveMarkdown, FileSystem}
+  alias Livebook.FileSystem
 
   @impl true
   def mount(socket) do
-    sessions = Sessions.list_sessions()
+    sessions = Livebook.Sessions.list_sessions()
     running_files = for session <- sessions, session.file, do: session.file
     {:ok, assign(socket, running_files: running_files)}
   end
 
   @impl true
+  def update(%{event: {:mount_file_system, file_system}}, socket) do
+    :ok = FileSystem.mount(file_system)
+    {:ok, socket}
+  end
+
   def update(%{event: {:set_file, file, _info}}, socket) do
     current_file = socket.assigns.draft_file
 
@@ -49,10 +54,13 @@ defmodule LivebookWeb.SessionLive.PersistenceComponent do
       |> assign_new(:new_attrs, fn -> attrs end)
       |> assign_new(:draft_file, fn ->
         file ||
-          case assigns.session.origin do
-            # If it's a forked notebook, default to the same folder
-            {:file, file} -> FileSystem.File.containing_dir(file)
-            _ -> Livebook.Settings.default_dir(assigns.hub)
+          with {:file, file} <- assigns.session.origin,
+               {:ok, file_system} <- FileSystem.File.fetch_file_system(file),
+               true <- FileSystem.Utils.writable?(file_system) do
+            # If it's a fork and a writable file system, default to the same folder
+            FileSystem.File.containing_dir(file)
+          else
+            _otherwise -> Livebook.Settings.default_dir(assigns.hub)
           end
       end)
       |> assign_new(:saved_file, fn -> file end)
@@ -74,10 +82,12 @@ defmodule LivebookWeb.SessionLive.PersistenceComponent do
             id="persistence_file_select"
             file={@draft_file}
             hub={@hub}
-            extnames={[LiveMarkdown.extension()]}
+            extnames={[Livebook.LiveMarkdown.extension()]}
             running_files={@running_files}
             on_submit={JS.push("save", target: @myself)}
             target={{__MODULE__, @id}}
+            file_systems={@file_systems}
+            show_only_writable
           />
         </div>
         <div>
@@ -154,7 +164,7 @@ defmodule LivebookWeb.SessionLive.PersistenceComponent do
   end
 
   def handle_event("stop_saving", %{}, socket) do
-    Session.set_file(socket.assigns.session.pid, nil)
+    Livebook.Session.set_file(socket.assigns.session.pid, nil)
 
     {:noreply, push_patch(socket, to: ~p"/sessions/#{socket.assigns.session.id}")}
   end
@@ -166,16 +176,16 @@ defmodule LivebookWeb.SessionLive.PersistenceComponent do
     draft_file = normalize_file(draft_file)
 
     if draft_file != saved_file do
-      Session.set_file(assigns.session.pid, draft_file)
+      Livebook.Session.set_file(assigns.session.pid, draft_file)
     end
 
     diff = map_diff(new_attrs, attrs)
 
     if diff != %{} do
-      Session.set_notebook_attributes(assigns.session.pid, diff)
+      Livebook.Session.set_notebook_attributes(assigns.session.pid, diff)
     end
 
-    Session.save_sync(assigns.session.pid)
+    Livebook.Session.save_sync(assigns.session.pid)
 
     push_patch(socket, to: return_to(assigns))
   end
@@ -207,7 +217,7 @@ defmodule LivebookWeb.SessionLive.PersistenceComponent do
   end
 
   defp normalize_file(file) do
-    FileSystem.File.ensure_extension(file, LiveMarkdown.extension())
+    FileSystem.File.ensure_extension(file, Livebook.LiveMarkdown.extension())
   end
 
   defp savable?(draft_file, saved_file, running_files) do

@@ -1,6 +1,7 @@
 defmodule LivebookWeb.UserPlugTest do
   use ExUnit.Case, async: true
-  use Plug.Test
+  import Plug.Test
+  import Plug.Conn
 
   defp call(conn) do
     LivebookWeb.UserPlug.call(conn, LivebookWeb.UserPlug.init([]))
@@ -51,5 +52,15 @@ defmodule LivebookWeb.UserPlugTest do
       |> call()
 
     assert conn.cookies["lb_user_data"] == cookie_value
+  end
+
+  test "assigns identity data and user data" do
+    conn =
+      conn(:get, "/")
+      |> init_test_session(%{})
+      |> fetch_cookies()
+      |> call()
+
+    assert %{identity_data: %{}, user_data: %{}} = conn.assigns
   end
 end

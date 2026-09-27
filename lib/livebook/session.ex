@@ -85,11 +85,14 @@ defmodule Livebook.Session do
 
   require Logger
 
-  alias Livebook.NotebookManager
-  alias Livebook.Session.{Data, FileGuard}
-  alias Livebook.{Utils, Notebook, Text, Runtime, LiveMarkdown, FileSystem}
-  alias Livebook.Users.User
-  alias Livebook.Notebook.{Cell, Section}
+  alias Livebook.Session
+  alias Livebook.Session.Data
+  alias Livebook.Notebook
+  alias Livebook.Notebook.Cell
+  alias Livebook.Notebook.Section
+  alias Livebook.Runtime
+  alias Livebook.FileSystem
+  alias Livebook.Users
 
   @timeout :infinity
   @main_container_ref :main_flow
@@ -119,6 +122,7 @@ defmodule Livebook.Session do
           autosave_path: String.t() | nil,
           save_task_ref: reference() | nil,
           saved_default_file: FileSystem.File.t() | nil,
+          saved_md5: String.t() | nil,
           memory_usage: memory_usage(),
           worker_pid: pid(),
           registered_file_deletion_delay: pos_integer(),
@@ -129,10 +133,11 @@ defmodule Livebook.Session do
           deployment_ref: reference() | nil,
           deployed_app_monitor_ref: reference() | nil,
           app_pid: pid() | nil,
+          app_permanent: boolean() | nil,
           auto_shutdown_ms: non_neg_integer() | nil,
           auto_shutdown_timer_ref: reference() | nil,
-          started_by: Livebook.Users.User.t() | nil,
-          deployed_by: Livebook.Users.User.t() | nil
+          started_by: Users.User.t() | nil,
+          deployed_by: Users.User.t() | nil
         }
 
   @type memory_usage ::
@@ -147,7 +152,7 @@ defmodule Livebook.Session do
   @typedoc """
   An id assigned to every running session process.
   """
-  @type id :: Utils.id()
+  @type id :: Livebook.Utils.id()
 
   ## API
 
@@ -188,6 +193,8 @@ defmodule Livebook.Session do
 
     * `:app_pid` - the parent app process, when in running in `:app` mode
 
+    * `:app_permanent` - whether the app is permanent or a preview app
+
     * `:auto_shutdown_ms` - the inactivity period (no clients) after which
       the session should close automatically
 
@@ -197,6 +204,9 @@ defmodule Livebook.Session do
 
     * `:deployed_by` - the user that deployed the app, to which this
       session belongs to. This is only relevant for app sessions
+
+    * `:session_params` - the user parameters from query string, used to
+      start the session. This is only relevant to multi-session apps.
 
   """
   @spec start_link(keyword()) :: {:ok, pid, t()} | {:error, any()}
@@ -228,7 +238,7 @@ defmodule Livebook.Session do
   Also returns a unique client identifier representing the registered
   client.
   """
-  @spec register_client(pid(), pid(), User.t()) :: {Data.t(), Data.client_id()}
+  @spec register_client(pid(), pid(), Users.User.t()) :: {Data.t(), Data.client_id()}
   def register_client(pid, client_pid, user) do
     GenServer.call(pid, {:register_client, client_pid, user}, @timeout)
   end
@@ -275,7 +285,7 @@ defmodule Livebook.Session do
     * `:session_closed`
     * `{:session_updated, session}`
     * `{:hydrate_bin_entries, entries}`
-    * `{:operation, operation}`
+    * `{:operations, operations}`
     * `{:error, error}`
 
   """
@@ -432,17 +442,35 @@ defmodule Livebook.Session do
   @doc """
   Requests a cell to be moved with respect to other cells.
   """
-  @spec move_cell(pid(), Cell.id(), integer()) :: :ok
-  def move_cell(pid, cell_id, offset) do
-    GenServer.cast(pid, {:move_cell, self(), cell_id, offset})
+  @spec move_cell(pid(), Cell.id(), Section.id(), integer()) :: :ok
+  def move_cell(pid, cell_id, section_id, index) do
+    GenServer.cast(pid, {:move_cell, self(), cell_id, section_id, index})
   end
 
   @doc """
   Requests a section to be moved with respect to other sections.
   """
   @spec move_section(pid(), Section.id(), integer()) :: :ok
-  def move_section(pid, section_id, offset) do
-    GenServer.cast(pid, {:move_section, self(), section_id, offset})
+  def move_section(pid, section_id, index) do
+    GenServer.cast(pid, {:move_section, self(), section_id, index})
+  end
+
+  @doc """
+  Requests the given language to be enabled.
+
+  This inserts extra cells and adds dependencies if applicable.
+  """
+  @spec enable_language(pid(), atom()) :: :ok
+  def enable_language(pid, language) do
+    GenServer.cast(pid, {:enable_language, self(), language})
+  end
+
+  @doc """
+  Requests the given language to be disabled.
+  """
+  @spec disable_language(pid(), atom()) :: :ok
+  def disable_language(pid, language) do
+    GenServer.cast(pid, {:disable_language, self(), language})
   end
 
   @doc """
@@ -568,7 +596,7 @@ defmodule Livebook.Session do
           pid(),
           Cell.id(),
           Data.cell_source_tag(),
-          Text.Delta.t(),
+          Livebook.Text.Delta.t(),
           Selection.t() | nil,
           Data.cell_revision()
         ) :: :ok
@@ -763,6 +791,18 @@ defmodule Livebook.Session do
   end
 
   @doc """
+  Requests the session to sync its notebook state from the persisted
+  file.
+
+  This is useful when the file content changes via external operations
+  and the user wants to reflect those changes in the running session.
+  """
+  @spec sync_file(pid()) :: :ok
+  def sync_file(pid) do
+    GenServer.cast(pid, :sync_file)
+  end
+
+  @doc """
   Copies the given file into a session-owned location.
 
   Only the most recent file for the given `key` is kept, old files
@@ -776,18 +816,35 @@ defmodule Livebook.Session do
 
   """
   @spec register_file(pid(), String.t(), String.t(), keyword()) ::
-          {:ok, Runtime.file_ref()} | :error
+          {:ok, Runtime.file_ref()} | {:error, String.t()}
   def register_file(pid, source_path, key, opts \\ []) do
     opts = Keyword.validate!(opts, [:linked_client_id])
 
-    %{file_ref: file_ref, path: path} = GenServer.call(pid, :register_file_init)
-
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         :ok <- File.cp(source_path, path) do
+    with {:ok, file_ref, copy_into} <- GenServer.call(pid, :register_file_init),
+         :ok <- copy_file(source_path, copy_into) do
       GenServer.cast(pid, {:register_file_finish, file_ref, key, opts[:linked_client_id]})
       {:ok, file_ref}
-    else
-      _ -> :error
+    end
+  end
+
+  defp copy_file(source_path, {:path, path}) do
+    case File.cp(source_path, path) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "copying file failed, reason: #{inspect(reason)}"}
+    end
+  end
+
+  defp copy_file(source_path, {:file, file_pid}) do
+    try do
+      source_path
+      |> File.stream!(64_000, [])
+      |> Enum.each(fn chunk -> IO.binwrite(file_pid, chunk) end)
+
+      :ok
+    rescue
+      error -> {:error, "copying file failed, reason: #{inspect(error)}"}
+    after
+      File.close(file_pid)
     end
   end
 
@@ -879,7 +936,8 @@ defmodule Livebook.Session do
   @impl true
   def init({caller_pid, opts}) do
     Livebook.Settings.subscribe()
-    Livebook.Hubs.Broadcasts.subscribe([:crud, :secrets])
+    Livebook.Hubs.Broadcasts.subscribe([:crud, :secrets, :file_systems])
+    Livebook.Teams.Broadcasts.subscribe(:app_folders)
 
     id = Keyword.fetch!(opts, :id)
 
@@ -933,6 +991,7 @@ defmodule Livebook.Session do
         autosave_path: opts[:autosave_path],
         save_task_ref: nil,
         saved_default_file: nil,
+        saved_md5: nil,
         memory_usage: %{runtime: nil, system: Livebook.SystemResources.memory()},
         worker_pid: worker_pid,
         registered_file_deletion_delay: opts[:registered_file_deletion_delay] || 15_000,
@@ -941,10 +1000,12 @@ defmodule Livebook.Session do
         deployment_ref: nil,
         deployed_app_monitor_ref: nil,
         app_pid: opts[:app_pid],
+        app_permanent: opts[:app_permanent],
         auto_shutdown_ms: opts[:auto_shutdown_ms],
         auto_shutdown_timer_ref: nil,
         started_by: opts[:started_by],
-        deployed_by: opts[:deployed_by]
+        deployed_by: opts[:deployed_by],
+        session_params: opts[:session_params]
       }
 
       {:ok, state}
@@ -960,7 +1021,7 @@ defmodule Livebook.Session do
     data = Data.new(notebook: notebook, origin: origin, mode: mode)
 
     if file do
-      case FileGuard.lock(file, self()) do
+      case Session.FileGuard.lock(file, self()) do
         :ok ->
           {:ok, %{data | file: file}}
 
@@ -1051,7 +1112,7 @@ defmodule Livebook.Session do
         {state, client_id}
       else
         Process.monitor(client_pid)
-        client_id = Utils.random_id()
+        client_id = Livebook.Utils.random_id()
         state = handle_operation(state, {:client_join, client_id, user})
         state = put_in(state.client_pids_with_id[client_pid], client_id)
         {state, client_id}
@@ -1097,11 +1158,32 @@ defmodule Livebook.Session do
     {:reply, :ok, maybe_save_notebook_sync(state)}
   end
 
-  def handle_call(:register_file_init, _from, state) do
-    file_id = Utils.random_id()
+  def handle_call(:register_file_init, {from_pid, _tag}, state) do
+    file_id = Livebook.Utils.random_id()
     file_ref = {:file, file_id}
     path = registered_file_path(state.session_id, file_ref)
-    reply = %{file_ref: file_ref, path: path}
+
+    dir = Path.dirname(path)
+
+    reply =
+      case File.mkdir_p(dir) do
+        :ok ->
+          if node(from_pid) == node() do
+            {:ok, file_ref, {:path, path}}
+          else
+            case File.open(path, [:binary, :write]) do
+              {:ok, file_pid} ->
+                {:ok, file_ref, {:file, file_pid}}
+
+              {:error, reason} ->
+                {:error, "failed to open file #{path}, reason: #{inspect(reason)}"}
+            end
+          end
+
+        {:error, reason} ->
+          {:error, "failed to create directory #{dir}, reason: #{inspect(reason)}"}
+      end
+
     {:reply, reply, state}
   end
 
@@ -1150,34 +1232,34 @@ defmodule Livebook.Session do
   def handle_cast({:insert_section, client_pid, index}, state) do
     client_id = client_id(state, client_pid)
     # Include new id in the operation, so it's reproducible
-    operation = {:insert_section, client_id, index, Utils.random_id()}
+    operation = {:insert_section, client_id, index, Livebook.Utils.random_id()}
     {:noreply, handle_operation(state, operation)}
   end
 
   def handle_cast({:insert_section_into, client_pid, section_id, index}, state) do
     client_id = client_id(state, client_pid)
     # Include new id in the operation, so it's reproducible
-    operation = {:insert_section_into, client_id, section_id, index, Utils.random_id()}
+    operation = {:insert_section_into, client_id, section_id, index, Livebook.Utils.random_id()}
     {:noreply, handle_operation(state, operation)}
   end
 
   def handle_cast({:insert_branching_section_into, client_pid, section_id, index}, state) do
     client_id = client_id(state, client_pid)
     # Include new id in the operation, so it's reproducible
-    operation = {:insert_branching_section_into, client_id, section_id, index, Utils.random_id()}
+    operation =
+      {:insert_branching_section_into, client_id, section_id, index, Livebook.Utils.random_id()}
+
     {:noreply, handle_operation(state, operation)}
   end
 
   def handle_cast({:set_section_parent, client_pid, section_id, parent_id}, state) do
     client_id = client_id(state, client_pid)
-    # Include new id in the operation, so it's reproducible
     operation = {:set_section_parent, client_id, section_id, parent_id}
     {:noreply, handle_operation(state, operation)}
   end
 
   def handle_cast({:unset_section_parent, client_pid, section_id}, state) do
     client_id = client_id(state, client_pid)
-    # Include new id in the operation, so it's reproducible
     operation = {:unset_section_parent, client_id, section_id}
     {:noreply, handle_operation(state, operation)}
   end
@@ -1185,7 +1267,9 @@ defmodule Livebook.Session do
   def handle_cast({:insert_cell, client_pid, section_id, index, type, attrs}, state) do
     client_id = client_id(state, client_pid)
     # Include new id in the operation, so it's reproducible
-    operation = {:insert_cell, client_id, section_id, index, type, Utils.random_id(), attrs}
+    operation =
+      {:insert_cell, client_id, section_id, index, type, Livebook.Utils.random_id(), attrs}
+
     {:noreply, handle_operation(state, operation)}
   end
 
@@ -1207,15 +1291,53 @@ defmodule Livebook.Session do
     {:noreply, handle_operation(state, operation)}
   end
 
-  def handle_cast({:move_cell, client_pid, cell_id, offset}, state) do
+  def handle_cast({:move_cell, client_pid, cell_id, section_id, index}, state) do
     client_id = client_id(state, client_pid)
-    operation = {:move_cell, client_id, cell_id, offset}
+    operation = {:move_cell, client_id, cell_id, section_id, index}
     {:noreply, handle_operation(state, operation)}
   end
 
-  def handle_cast({:move_section, client_pid, section_id, offset}, state) do
+  def handle_cast({:move_section, client_pid, section_id, index}, state) do
     client_id = client_id(state, client_pid)
-    operation = {:move_section, client_id, section_id, offset}
+    operation = {:move_section, client_id, section_id, index}
+    {:noreply, handle_operation(state, operation)}
+  end
+
+  def handle_cast({:enable_language, client_pid, language}, state) do
+    dependencies = [
+      Livebook.Runtime.Definitions.pythonx_dependency(),
+      Livebook.Runtime.Definitions.kino_pythonx_dependency()
+    ]
+
+    case do_add_dependencies(state, dependencies) do
+      {:ok, state} ->
+        client_id = client_id(state, client_pid)
+
+        # If there is a single empty cell (new notebook), change its
+        # language automatically. Note that we cannot do it as part of
+        # the :enable_language operation, because clients prune the
+        # source.
+        state =
+          case state.data.notebook.sections do
+            [%{cells: [%{source: ""} = cell]}] ->
+              operation = {:set_cell_attributes, client_id, cell.id, %{language: language}}
+              handle_operation(state, operation)
+
+            _ ->
+              state
+          end
+
+        operation = {:enable_language, client_id, language}
+        {:noreply, handle_operation(state, operation)}
+
+      {:error, state} ->
+        {:noreply, state}
+    end
+  end
+
+  def handle_cast({:disable_language, client_pid, language}, state) do
+    client_id = client_id(state, client_pid)
+    operation = {:disable_language, client_id, language}
     {:noreply, handle_operation(state, operation)}
   end
 
@@ -1240,7 +1362,7 @@ defmodule Livebook.Session do
               source = binary_part(cell.source, offset, size)
               attrs = %{source: source}
               cell_idx = index + chunk_idx
-              cell_id = Utils.random_id()
+              cell_id = Livebook.Utils.random_id()
 
               handle_operation(
                 state,
@@ -1257,7 +1379,8 @@ defmodule Livebook.Session do
   end
 
   def handle_cast({:add_dependencies, dependencies}, state) do
-    {:noreply, do_add_dependencies(state, dependencies)}
+    {_ok_error, state} = do_add_dependencies(state, dependencies)
+    {:noreply, state}
   end
 
   def handle_cast({:queue_cell_evaluation, client_pid, cell_id, evaluation_opts}, state) do
@@ -1374,14 +1497,14 @@ defmodule Livebook.Session do
     client_id = client_id(state, client_pid)
 
     if file do
-      FileGuard.lock(file, self())
+      Session.FileGuard.lock(file, self())
     else
       :ok
     end
     |> case do
       :ok ->
         if state.data.file do
-          FileGuard.unlock(state.data.file)
+          Session.FileGuard.unlock(state.data.file)
         end
 
         {:noreply, handle_operation(state, {:set_file, client_id, file})}
@@ -1509,6 +1632,34 @@ defmodule Livebook.Session do
     {:noreply, handle_operation(state, operation)}
   end
 
+  def handle_cast(:sync_file, state) do
+    state =
+      with %FileSystem.File{} = file <- state.data.file,
+           {:ok, content} <- FileSystem.File.read(file),
+           # When using a file watcher, our save may trigger another
+           # sync, so we check if the file changed since our last
+           # save to shortcut that scenario.
+           true <- state.saved_md5 == nil or state.saved_md5 != :erlang.md5(content),
+           {notebook, _info} <- Livebook.LiveMarkdown.notebook_from_livemd(content) do
+        operations = Livebook.Session.DataSync.sync(state.data, notebook, @client_id)
+        state = handle_operations(state, operations)
+
+        # If autosave is configured, trigger it immediately after sync.
+        # The export may differ from the current file contents, and we
+        # don't want the autosave to kick in later when the user keeps
+        # modifying the file (it often triggers an editor popup).
+        if state.data.notebook.autosave_interval_s do
+          maybe_save_notebook_async(state)
+        else
+          state
+        end
+      else
+        _ -> state
+      end
+
+    {:noreply, state}
+  end
+
   @impl true
   def handle_info({:DOWN, ref, :process, _, reason}, state)
       when ref == state.runtime_connect.ref do
@@ -1612,7 +1763,7 @@ defmodule Livebook.Session do
     state =
       if client_pid do
         operation = {:add_cell_evaluation_output, @client_id, cell_id, output}
-        send(client_pid, {:operation, operation})
+        send(client_pid, {:operations, [operation]})
 
         # Keep track of assets infos, so we can look them up when fetching
         new_asset_infos =
@@ -1636,7 +1787,7 @@ defmodule Livebook.Session do
   def handle_info({:runtime_evaluation_output_to_clients, cell_id, output}, state) do
     output = normalize_runtime_output(output)
     operation = {:add_cell_evaluation_output, @client_id, cell_id, output}
-    broadcast_operation(state.session_id, operation)
+    broadcast_message(state.session_id, {:operations, [operation]})
 
     # Keep track of assets infos, so we can look them up when fetching
     new_asset_infos =
@@ -1743,16 +1894,11 @@ defmodule Livebook.Session do
 
   def handle_info({:runtime_user_info_request, reply_to, client_id}, state) do
     reply =
-      cond do
-        not state.data.notebook.teams_enabled ->
-          {:error, :not_available}
-
-        user_id = state.data.clients_map[client_id] ->
-          user = Map.fetch!(state.data.users_map, user_id)
-          {:ok, user_info(user)}
-
-        true ->
-          {:error, :not_found}
+      if user_id = state.data.clients_map[client_id] do
+        user = Map.fetch!(state.data.users_map, user_id)
+        {:ok, user_info(user)}
+      else
+        {:error, :not_found}
       end
 
     send(reply_to, {:runtime_user_info_reply, reply})
@@ -1780,10 +1926,10 @@ defmodule Livebook.Session do
     {:noreply, handle_operation(state, operation)}
   end
 
-  def handle_info({ref, {:save_finished, result, warnings, file, default?}}, state)
+  def handle_info({ref, {:save_finished, result, md5, warnings, file, default?}}, state)
       when ref == state.save_task_ref do
     state = %{state | save_task_ref: nil}
-    {:noreply, handle_save_finished(state, result, warnings, file, default?)}
+    {:noreply, handle_save_finished(state, result, md5, warnings, file, default?)}
   end
 
   def handle_info({:runtime_memory_usage, runtime_memory}, state) do
@@ -1952,6 +2098,20 @@ defmodule Livebook.Session do
       when event in [:secret_created, :secret_updated, :secret_deleted] and
              secret.hub_id == state.data.notebook.hub_id do
     operation = {:sync_hub_secrets, @client_id}
+    {:noreply, handle_operation(state, operation)}
+  end
+
+  def handle_info({event, file_system}, state)
+      when event in [:file_system_created, :file_system_updated, :file_system_deleted] and
+             file_system.hub_id == state.data.notebook.hub_id do
+    operation = {:sync_hub_file_systems, @client_id}
+    {:noreply, handle_operation(state, operation)}
+  end
+
+  def handle_info({event, app_folder}, state)
+      when event in [:app_folder_created, :app_folder_updated, :app_folder_deleted] and
+             app_folder.hub_id == state.data.notebook.hub_id do
+    operation = {:sync_hub_app_folders, @client_id}
     {:noreply, handle_operation(state, operation)}
   end
 
@@ -2220,21 +2380,26 @@ defmodule Livebook.Session do
   end
 
   defp do_add_dependencies(state, dependencies) do
-    {:ok, cell, _} = Notebook.fetch_cell_and_section(state.data.notebook, Cell.setup_cell_id())
+    {:ok, cell, _} =
+      Notebook.fetch_cell_and_section(state.data.notebook, Cell.main_setup_cell_id())
+
     source = cell.source
 
-    case Runtime.add_dependencies(state.data.runtime, source, dependencies) do
+    case Runtime.Dependencies.insert_mix_dependencies(source, dependencies) do
       {:ok, ^source} ->
-        state
+        {:ok, state}
 
       {:ok, new_source} ->
         delta = Livebook.Text.Delta.diff(cell.source, new_source)
         revision = state.data.cell_infos[cell.id].sources.primary.revision
 
-        handle_operation(
-          state,
-          {:apply_cell_delta, @client_id, cell.id, :primary, delta, nil, revision}
-        )
+        state =
+          handle_operation(
+            state,
+            {:apply_cell_delta, @client_id, cell.id, :primary, delta, nil, revision}
+          )
+
+        {:ok, state}
 
       {:error, message} ->
         broadcast_error(
@@ -2242,7 +2407,7 @@ defmodule Livebook.Session do
           "failed to add dependencies to the setup cell, reason:\n\n#{message}"
         )
 
-        state
+        {:error, state}
     end
   end
 
@@ -2258,22 +2423,28 @@ defmodule Livebook.Session do
   #     to reflect the new `Livebook.Session.Data`
   #
   defp handle_operation(state, operation) do
-    broadcast_operation(state.session_id, operation)
+    handle_operations(state, [operation])
+  end
 
-    case Data.apply_operation(state.data, operation) do
-      {:ok, new_data, actions} ->
-        %{state | data: new_data}
-        |> after_operation(state, operation)
-        |> handle_actions(actions)
+  defp handle_operations(state, operations) do
+    broadcast_message(state.session_id, {:operations, operations})
 
-      :error ->
-        state
-    end
+    Enum.reduce(operations, state, fn operation, state ->
+      case Data.apply_operation(state.data, operation) do
+        {:ok, new_data, actions} ->
+          %{state | data: new_data}
+          |> after_operation(state, operation)
+          |> handle_actions(actions)
+
+        :error ->
+          state
+      end
+    end)
   end
 
   defp after_operation(state, _prev_state, {:set_notebook_name, _client_id, _name}) do
     if file = state.data.file do
-      NotebookManager.update_notebook_name(file, state.data.notebook.name)
+      Livebook.NotebookManager.update_notebook_name(file, state.data.notebook.name)
     end
 
     notify_update(state)
@@ -2321,7 +2492,7 @@ defmodule Livebook.Session do
 
   defp after_operation(state, prev_state, {:client_join, client_id, user}) do
     unless Map.has_key?(prev_state.data.users_map, user.id) do
-      Livebook.Users.subscribe(user.id)
+      Users.subscribe(user.id)
     end
 
     state = put_in(state.client_id_with_assets[client_id], %{})
@@ -2339,7 +2510,7 @@ defmodule Livebook.Session do
     user_id = prev_state.data.clients_map[client_id]
 
     unless Map.has_key?(state.data.users_map, user_id) do
-      Livebook.Users.unsubscribe(user_id)
+      Users.unsubscribe(user_id)
     end
 
     state = delete_client_files(state, client_id)
@@ -2393,7 +2564,7 @@ defmodule Livebook.Session do
          _prev_state,
          {:smart_cell_started, _client_id, cell_id, delta, _chunks, _js_view, _editor}
        ) do
-    unless Text.Delta.empty?(delta) do
+    unless Livebook.Text.Delta.empty?(delta) do
       hydrate_cell_source_digest(state, cell_id, :primary)
     end
 
@@ -2571,23 +2742,10 @@ defmodule Livebook.Session do
   defp handle_action(state, _action), do: state
 
   defp start_evaluation(state, cell, section, evaluation_opts) do
-    evaluation_users =
-      case state.data.mode do
-        :default -> Map.values(state.data.users_map)
-        :app -> if(state.deployed_by, do: [state.deployed_by], else: [])
-      end
-
-    Logger.info(
-      [
-        """
-        Evaluating code
-          Session mode: #{state.data.mode}
-          Code: \
-        """,
-        inspect(cell.source, printable_limit: :infinity)
-      ],
-      Livebook.Utils.logger_users_metadata(evaluation_users)
-    )
+    # Only log code evaluation if inside a regular notebook session or a preview app
+    if state.data.mode == :default or state.app_permanent == false do
+      log_code_evaluation(cell, state)
+    end
 
     path =
       case state.data.file || default_notebook_file(state) do
@@ -2626,16 +2784,48 @@ defmodule Livebook.Session do
     state
   end
 
+  defp log_code_evaluation(cell, state) do
+    session_mode = state.data.mode
+
+    evaluation_users =
+      case session_mode do
+        :default -> Map.values(state.data.users_map)
+        :app -> if(state.deployed_by, do: [state.deployed_by], else: [])
+      end
+
+    # We plan to deprecate this one in favor of the log call below.
+    # We're keeping this here because users may be depending on this already.
+    # Once the new log below, we ask users to migrate, and eventually delete
+    # this one.
+    Logger.info(
+      [
+        """
+        Evaluating code
+          Session mode: #{session_mode}
+          Code: \
+        """,
+        inspect(cell.source, printable_limit: :infinity)
+      ],
+      Livebook.Utils.logger_users_metadata(evaluation_users)
+    )
+
+    Logger.info(
+      "Evaluating code",
+      Keyword.merge(
+        Livebook.Utils.logger_users_metadata(evaluation_users),
+        session_mode: session_mode,
+        code: cell.source,
+        event: "code.evaluate"
+      )
+    )
+  end
+
   defp hydrate_cell_source_digest(state, cell_id, tag) do
     # Clients prune source, so they can't compute the digest, but it's
     # necessary for evaluation to know which cells are changed, so we
     # always propagate the digest change to the clients
     digest = state.data.cell_infos[cell_id].sources[tag].digest
     broadcast_message(state.session_id, {:hydrate_cell_source_digest, cell_id, tag, digest})
-  end
-
-  defp broadcast_operation(session_id, operation) do
-    broadcast_message(session_id, {:operation, operation})
   end
 
   defp broadcast_error(session_id, error) do
@@ -2691,9 +2881,10 @@ defmodule Livebook.Session do
 
       %{ref: ref} =
         Task.Supervisor.async_nolink(Livebook.TaskSupervisor, fn ->
-          {content, warnings} = LiveMarkdown.notebook_to_livemd(notebook)
+          {content, warnings} = Livebook.LiveMarkdown.notebook_to_livemd(notebook)
           result = FileSystem.File.write(file, content)
-          {:save_finished, result, warnings, file, default?}
+          md5 = :erlang.md5(content)
+          {:save_finished, result, md5, warnings, file, default?}
         end)
 
       %{state | save_task_ref: ref}
@@ -2708,9 +2899,10 @@ defmodule Livebook.Session do
     {file, default?} = notebook_autosave_file(state)
 
     if file && should_save_notebook?(state) do
-      {content, warnings} = LiveMarkdown.notebook_to_livemd(state.data.notebook)
+      {content, warnings} = Livebook.LiveMarkdown.notebook_to_livemd(state.data.notebook)
       result = FileSystem.File.write(file, content)
-      handle_save_finished(state, result, warnings, file, default?)
+      md5 = :erlang.md5(content)
+      handle_save_finished(state, result, md5, warnings, file, default?)
     else
       state
     end
@@ -2759,14 +2951,14 @@ defmodule Livebook.Session do
     end
   end
 
-  defp handle_save_finished(state, result, warnings, file, default?) do
+  defp handle_save_finished(state, result, md5, warnings, file, default?) do
     case result do
       :ok ->
         if state.saved_default_file && state.saved_default_file != file do
           FileSystem.File.remove(state.saved_default_file)
         end
 
-        state = %{state | saved_default_file: if(default?, do: file, else: nil)}
+        state = %{state | saved_default_file: if(default?, do: file, else: nil), saved_md5: md5}
 
         handle_operation(state, {:notebook_saved, @client_id, warnings})
 
@@ -2993,6 +3185,13 @@ defmodule Livebook.Session do
       %{mode: :app, notebook: %{app_settings: %{multi_session: true}}} ->
         info = %{type: :multi_session}
 
+        info =
+          if params = state.session_params do
+            Map.put(info, :session_params, params)
+          else
+            info
+          end
+
         if user = state.started_by do
           started_by = user_info(user)
           Map.put(info, :started_by, started_by)
@@ -3171,6 +3370,25 @@ defmodule Livebook.Session do
 
   defp normalize_runtime_output(%{type: :plain_text} = plain_text) do
     Map.put_new(plain_text, :style, [])
+  end
+
+  defp normalize_runtime_output(%{type: :input} = input) when input.attrs.type == :number do
+    update_in(input.attrs, fn attrs ->
+      attrs
+      |> Map.put_new(:min, nil)
+      |> Map.put_new(:max, nil)
+      |> Map.put_new(:step, nil)
+    end)
+  end
+
+  defp normalize_runtime_output(%{type: :control} = control) when control.attrs.type == :form do
+    update_in(control.attrs.fields, fn fields ->
+      Enum.map(fields, fn
+        {field, nil} -> {field, nil}
+        # Normalize each form input.
+        {field, input} -> {field, normalize_runtime_output(input)}
+      end)
+    end)
   end
 
   # Traverse composite outputs

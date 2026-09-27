@@ -22,6 +22,12 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 livebook-*.tar
 
+# Ignore assets that are produced by build tools.
+/priv/static/
+
+# Ignore digested assets cache.
+/priv/static/cache_manifest.json
+
 # If NPM crashes, it generates a log, let's ignore it too.
 npm-debug.log
 
@@ -34,6 +40,4 @@ npm-debug.log
 # The built Escript
 /livebook
 
-# We generate priv when building release or escript
-/priv/static
-/priv/iframe_static
+/rel/app/resources

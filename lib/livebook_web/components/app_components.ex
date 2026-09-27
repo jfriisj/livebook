@@ -13,6 +13,27 @@ defmodule LivebookWeb.AppComponents do
   end
 
   @doc """
+  Renders the apps banner.
+
+  ## Examples
+
+      <.apps_banner value="MyAppsBanner" />
+  """
+  attr :value, :string, default: nil
+
+  def apps_banner(assigns) do
+    ~H"""
+    <div
+      :if={@value}
+      id="apps-banner"
+      class="w-full bg-gray-800 text-xs text-gray-400 text-center py-1 tracking-wider uppercase"
+    >
+      {@value}
+    </div>
+    """
+  end
+
+  @doc """
   Renders app status with indicator.
   """
   attr :status, :map, required: true
@@ -125,28 +146,11 @@ defmodule LivebookWeb.AppComponents do
             for more information.
           </div>
           <p class="mt-1 text-sm">
-            Automatic clustering is available when deploying to Fly.io and Kubernetes.
+            Automatic clustering is available when deploying to AWS ECS, Fly.io, and Kubernetes.
           </p>
         </div>
       </div>
     </div>
-
-    <%= if Livebook.Hubs.Provider.type(@hub) == "team" and to_string(@form[:mode].value) == "online" do %>
-      <div class="flex flex-col gap-2">
-        <.checkbox_field
-          field={@form[:teams_auth]}
-          label="Authenticate via Livebook Teams"
-          help={
-            ~S'''
-            When enabled, apps deployed in
-            this deployment group will use
-            Livebook Teams for authentication.
-            '''
-          }
-          small
-        />
-      </div>
-    <% end %>
     """
   end
 

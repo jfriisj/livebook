@@ -101,8 +101,21 @@ defmodule Livebook do
       config :logger, level: level
     end
 
-    if metadata = Livebook.Config.log_metadata!("LIVEBOOK_LOG_METADATA") do
-      config :logger, :console, metadata: metadata
+    log_metadata = Livebook.Config.log_metadata!("LIVEBOOK_LOG_METADATA")
+    log_format = Livebook.Config.log_format!("LIVEBOOK_LOG_FORMAT") || :text
+
+    config :livebook, :log_format, log_format
+
+    case {log_format, log_metadata} do
+      {:json, log_metadata} ->
+        config :logger, :default_handler,
+          formatter: {LoggerJSON.Formatters.Basic, %{metadata: log_metadata || [:request_id]}}
+
+      {:text, log_metadata} when not is_nil(log_metadata) ->
+        config :logger, :default_formatter, metadata: log_metadata
+
+      _ ->
+        :ok
     end
 
     if port = Livebook.Config.port!("LIVEBOOK_PORT") do
@@ -146,6 +159,10 @@ defmodule Livebook do
       config :livebook, teams_url: url, warn_on_live_teams_server: false
     end
 
+    if System.get_env("LIVEBOOK_TEAMS_AUTH") do
+      config :livebook, :persist_storage, false
+    end
+
     if Livebook.Config.boolean!("LIVEBOOK_SHUTDOWN_ENABLED", false) do
       config :livebook, :shutdown_callback, {System, :stop, []}
     end
@@ -184,14 +201,6 @@ defmodule Livebook do
 
     if apps_path = System.get_env("LIVEBOOK_APPS_PATH") do
       config :livebook, :apps_path, apps_path
-    end
-
-    # TODO: remove in v1.0
-    if System.get_env("LIVEBOOK_APPS_PATH_HUB_ID") do
-      IO.warn(
-        ~s/Ignoring LIVEBOOK_APPS_PATH_HUB_ID, this environment variable is no longer used./,
-        []
-      )
     end
 
     if apps_path_password = Livebook.Config.password!("LIVEBOOK_APPS_PATH_PASSWORD") do
@@ -257,14 +266,20 @@ defmodule Livebook do
       config :livebook, :agent_name, agent_name
     end
 
+    if format = Livebook.Config.apps_banner!("LIVEBOOK_APPS_BANNER") do
+      config :livebook, :apps_banner, format
+    end
+
+    if image_registry_url = Livebook.Config.image_registry_url!("LIVEBOOK_IMAGE_REGISTRY_URL") do
+      config :livebook, :image_registry_url, image_registry_url
+    end
+
+    # TODO: remove in v1.0
     if Livebook.Config.boolean!("LIVEBOOK_FIPS", false) do
-      if :crypto.enable_fips_mode(true) do
-        IO.puts("[Livebook] FIPS mode enabled")
-      else
-        Livebook.Config.abort!(
-          "Requested FIPS mode via LIVEBOOK_FIPS, but this Erlang installation was compiled without FIPS support"
-        )
-      end
+      IO.warn(
+        ~s/Ignoring LIVEBOOK_FIPS=true, because it is no longer supported. Set ERL_AFLAGS="-crypto fips_mode true" instead./,
+        []
+      )
     end
   end
 

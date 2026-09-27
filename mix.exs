@@ -1,12 +1,12 @@
-if System.otp_release() < "25" do
-  Mix.raise("Livebook requires Erlang/OTP 25+")
+if System.otp_release() < "27" do
+  Mix.raise("Livebook requires Erlang/OTP 27+")
 end
 
 defmodule Livebook.MixProject do
   use Mix.Project
 
   @elixir_requirement "~> 1.18"
-  @version "0.15.0-dev"
+  @version "0.20.0-dev"
   @description "Automate code & data workflows with interactive notebooks"
 
   def project do
@@ -18,7 +18,9 @@ defmodule Livebook.MixProject do
       description: @description,
       elixirc_paths: elixirc_paths(Mix.env()),
       test_elixirc_options: [docs: true],
+      compilers: [:phoenix_live_view] ++ Mix.compilers() ++ [:ensure_livebook_priv],
       start_permanent: Mix.env() == :prod,
+      listeners: [Phoenix.CodeReloader],
       aliases: aliases(),
       deps: with_lock(target_deps(Mix.target()) ++ deps()),
       escript: escript(),
@@ -33,6 +35,8 @@ defmodule Livebook.MixProject do
   end
 
   def application do
+    env = Application.get_all_env(:livebook)
+
     [
       mod: {Livebook.Application, []},
       extra_applications: [
@@ -45,7 +49,9 @@ defmodule Livebook.MixProject do
         :crypto,
         :public_key
       ],
-      env: Application.get_all_env(:livebook)
+      # Erase live reload as it contains regexes which fails
+      # when loaded in the next run
+      env: put_in(env[LivebookWeb.Endpoint][:live_reload], [])
     ]
   end
 
@@ -58,20 +64,29 @@ defmodule Livebook.MixProject do
       links: %{
         "GitHub" => "https://github.com/livebook-dev/livebook"
       },
-      files:
-        ~w(lib static priv/.gitkeep config mix.exs mix.lock README.md LICENSE CHANGELOG.md iframe/priv/static/iframe proto/lib)
+      # Note that when publishing, we include pre-built priv and not assets.
+      files: ~w(lib config priv mix.exs mix.lock README.md LICENSE CHANGELOG.md proto/lib)
     ]
   end
 
   defp aliases do
     [
-      setup: ["deps.get", "cmd --cd assets npm install"],
-      "assets.deploy": ["cmd npm run deploy --prefix assets"],
-      "format.all": ["format", "cmd --cd assets npm run --silent format"],
+      setup: ["deps.get", "assets.setup"],
+      "setup.prod": ["deps.get --prod", "assets.setup"],
+      "assets.setup": ["bun.install --if-missing", "bun assets install", "assets.build"],
+      "assets.build": ["bun assets run build"],
+      "format.all": ["format", "bun assets run --silent format"],
       "protobuf.generate": ["cmd --cd proto mix protobuf.generate"],
-      "phx.server": ["livebook.gen_priv", "phx.server"],
-      "escript.build": ["livebook.gen_priv", "escript.build"],
-      release: ["livebook.gen_priv", "release"]
+      # Always build priv/ before publishing to Hex, so that no build
+      # is required on escript installation.
+      "hex.publish": [
+        "assets.setup",
+        # Compilation prunes code paths, so Hex task modules are no
+        # longer available. We need to bring the application back
+        # explicitly, in order to access its modules.
+        fn _ -> Mix.ensure_application!(:hex) end,
+        "hex.publish"
+      ]
     ]
   end
 
@@ -103,8 +118,8 @@ defmodule Livebook.MixProject do
   #
   defp deps do
     [
-      {:phoenix, "~> 1.7.8"},
-      {:phoenix_live_view, "~> 1.0.0"},
+      {:phoenix, "~> 1.8"},
+      {:phoenix_live_view, "~> 1.1.0"},
       {:phoenix_html, "~> 4.0"},
       {:phoenix_live_dashboard, "~> 0.8.4"},
       {:telemetry_metrics, "~> 1.0"},
@@ -112,27 +127,33 @@ defmodule Livebook.MixProject do
       {:bandit, "~> 1.0"},
       {:plug, "~> 1.16"},
       {:plug_crypto, "~> 2.0"},
-      {:earmark_parser, "~> 1.4"},
+      {:earmark_parser, "~> 1.4.44"},
       {:ecto, "~> 3.10"},
       {:phoenix_ecto, "~> 4.4"},
       {:aws_credentials, "~> 0.3.0", runtime: false},
       {:mint_web_socket, "~> 1.0.0"},
       {:protobuf, "~> 0.13.0"},
       {:dns_cluster, "~> 0.1.2"},
-      {:kubereq, "~> 0.3.0"},
+      {:kubereq, "~> 0.4.0"},
       {:yaml_elixir, "~> 2.11"},
-      {:phoenix_live_reload, "~> 1.2", only: :dev},
-      {:floki, ">= 0.27.0", only: :test},
-      {:bypass, "~> 2.1", only: :test},
-      # ZTA deps
-      {:jose, "~> 1.11.5"},
+      {:logger_json, "~> 6.1"},
       {:req, "~> 0.5.8"},
+      {:nimble_zta, "~> 0.1.0"},
+      {:bun, "~> 1.6", runtime: Mix.env() == :dev},
+      # Dev tools
+      {:phoenix_live_reload, "~> 1.2", only: :dev},
+      {:tidewave, "~> 0.5", only: :dev},
+      # Tests
+      {:lazy_html, "~> 0.1.0", only: :test},
+      {:bypass, "~> 2.1", only: :test},
+      {:pythonx, "~> 0.4.2", only: :test},
+      {:kino, "~> 0.18.0", only: :test},
       # Docs
-      {:ex_doc, "~> 0.30", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.39", only: :dev, runtime: false}
     ]
   end
 
-  defp target_deps(:app), do: [{:elixirkit, path: "elixirkit"}]
+  defp target_deps(:app), do: [{:elixirkit, github: "livebook-dev/elixirkit"}]
   defp target_deps(_), do: []
 
   @lock (with {:ok, contents} <- File.read("mix.lock"),
@@ -173,14 +194,29 @@ defmodule Livebook.MixProject do
       app: [
         applications: @release_apps,
         include_erts: false,
-        rel_templates_path: "rel/app",
+        rel_templates_path: "rel/#{Mix.target()}",
         steps: [
           :assemble,
           &remove_cookie/1,
-          &standalone_erlang_elixir/1
-        ]
+          &standalone_erlang_elixir/1,
+          &ElixirKit.Release.codesign/1
+        ],
+        entitlements: "#{__DIR__}/rel/app/src-tauri/App.entitlements"
       ]
     ]
+  end
+
+  if Mix.target() == :app do
+    {cargo_output, 0} = System.cmd("cargo", ["pkgid"], cd: "#{__DIR__}/rel/app/src-tauri")
+    [_, cargo_version] = Regex.run(~r/#.+@(.+)$/, String.trim(cargo_output))
+
+    if @version != cargo_version do
+      Mix.raise("""
+      Version mismatch:
+      mix.exs:    #{@version}
+      Cargo.toml: #{cargo_version}
+      """)
+    end
   end
 
   defp remove_cookie(release) do
@@ -193,7 +229,6 @@ defmodule Livebook.MixProject do
   defp write_runtime_modules(release) do
     # We copy the subset of Livebook modules that are injected into
     # the runtime node. See overlays/bin/server for more details
-
     app = release.applications[:livebook]
 
     source = Path.join([release.path, "lib", "livebook-#{app[:vsn]}", "ebin"])
@@ -228,17 +263,18 @@ defmodule Livebook.MixProject do
 
   defp docs() do
     [
-      logo: "static/images/logo.png",
+      logo: "assets/public/images/logo.png",
       main: "readme",
       api_reference: false,
       extra_section: "Guides",
       extras: extras(),
       filter_modules: fn mod, _ -> mod in [Livebook] end,
       assets: %{Path.expand("./docs/images") => "images"},
+      before_closing_head_tag: &before_closing_head_tag/1,
       groups_for_extras: [
         "Livebook Teams": Path.wildcard("docs/teams/*"),
         Deployment: Path.wildcard("docs/deployment/*"),
-        "Airgapped Authentication": Path.wildcard("docs/authentication/*")
+        "Zero Trust Authentication": Path.wildcard("docs/authentication/*")
       ]
     ]
   end
@@ -248,15 +284,28 @@ defmodule Livebook.MixProject do
       {"README.md", title: "Welcome to Livebook"},
       "docs/use_cases.md",
       "docs/authentication.md",
+      {"docs/runtime.md", title: "Runtimes"},
       "docs/stamping.md",
+      "docs/dev_endpoints.md",
       "docs/deployment/docker.md",
       "docs/deployment/clustering.md",
       "docs/deployment/fips.md",
       "docs/deployment/nginx_https.md",
       "docs/teams/intro_to_teams.md",
+      {"docs/teams/deploy_app.md", title: "Deploy Livebook apps"},
+      {"docs/teams/deploy_via_cli.md", title: "Deploy Livebook apps via CLI"},
+      "docs/teams/deploy_permissions.md",
+      {"docs/teams/app_folders.md", title: "Organize apps with folders"},
+      {"docs/teams/app_server_production.md", title: "Production app servers"},
+      {"docs/teams/email_domain.md", title: "Email domain auth"},
+      {"docs/teams/oidc_sso.md", title: "OIDC SSO"},
+      "docs/teams/oidc_groups.md",
       "docs/teams/shared_secrets.md",
       "docs/teams/shared_file_storages.md",
-      {"docs/teams/oidc_sso.md", title: "OIDC SSO"},
+      {"docs/teams/git_file_storage.md", title: "Open notebooks from a private Git"},
+      {"docs/teams/phoenix_integration.md", title: "Integrate with a Phoenix app"},
+      {"docs/teams/audit_logs.md", title: "Audit logs for code execution"},
+      {"docs/teams/teams_concepts.md", title: "Livebook Teams concepts"},
       "docs/authentication/basic_auth.md",
       "docs/authentication/cloudflare.md",
       "docs/authentication/google_iap.md",
@@ -264,4 +313,39 @@ defmodule Livebook.MixProject do
       "docs/authentication/custom_auth.md"
     ]
   end
+
+  defp before_closing_head_tag(:html) do
+    """
+    <script defer src="https://cdn.jsdelivr.net/npm/mermaid@10.2.3/dist/mermaid.min.js"></script>
+    <script>
+      let initialized = false;
+
+      window.addEventListener("exdoc:loaded", () => {
+        if (!initialized) {
+          mermaid.initialize({
+            startOnLoad: false,
+            theme: document.body.className.includes("dark") ? "dark" : "default"
+          });
+          initialized = true;
+        }
+
+        let id = 0;
+        for (const codeEl of document.querySelectorAll("pre code.mermaid")) {
+          const preEl = codeEl.parentElement;
+          const graphDefinition = codeEl.textContent;
+          const graphEl = document.createElement("div");
+          const graphId = "mermaid-graph-" + id++;
+          mermaid.render(graphId, graphDefinition).then(({svg, bindFunctions}) => {
+            graphEl.innerHTML = svg;
+            bindFunctions?.(graphEl);
+            preEl.insertAdjacentElement("afterend", graphEl);
+            preEl.remove();
+          });
+        }
+      });
+    </script>
+    """
+  end
+
+  defp before_closing_head_tag(_), do: ""
 end

@@ -73,32 +73,6 @@ defmodule Livebook.TestHelpers do
   end
 
   @doc """
-  Builds code that renders the given output as part of evaluation.
-  """
-  def source_for_output(output) do
-    quote do
-      send(
-        Process.group_leader(),
-        {:io_request, self(), make_ref(), {:livebook_put_output, unquote(Macro.escape(output))}}
-      )
-    end
-    |> Macro.to_string()
-  end
-
-  @doc """
-  Builds code that renders the given output as part of evaluation.
-  """
-  def source_for_input_read(input_id) do
-    quote do
-      send(
-        Process.group_leader(),
-        {:io_request, self(), make_ref(), {:livebook_get_input_value, unquote(input_id)}}
-      )
-    end
-    |> Macro.to_string()
-  end
-
-  @doc """
   Builds code that awaits for a messages before finishing.
 
   Returns `{code, continue_fun}`, where calling `continue_fun` should
@@ -135,6 +109,15 @@ defmodule Livebook.TestHelpers do
     end
   end
 
+  @doc """
+  Builds an error output map.
+  """
+  defmacro error_output(message) do
+    quote do
+      %{type: :error, message: unquote(message)}
+    end
+  end
+
   def clean_message(message) do
     message
     |> remove_trailing_whitespace()
@@ -147,5 +130,22 @@ defmodule Livebook.TestHelpers do
 
   defp remove_ansi(string) do
     String.replace(string, ~r/\e\[\d+m/, "")
+  end
+
+  # Returns intellisense context resulting from evaluating
+  # the given block of code in a fresh context.
+  defmacro intellisense_context_from_eval(ebin_path \\ System.tmp_dir!(), do: block) do
+    quote do
+      block = unquote(Macro.escape(block))
+      binding = []
+      env = Code.env_for_eval([])
+      {value, binding, env} = Code.eval_quoted_with_env(block, binding, env)
+
+      %{
+        env: env,
+        ebin_path: unquote(ebin_path),
+        map_binding: fn fun -> fun.(binding) end
+      }
+    end
   end
 end

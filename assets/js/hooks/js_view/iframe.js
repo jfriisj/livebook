@@ -26,16 +26,16 @@ import { sha256Base64 } from "../../lib/utils";
 // (2): https://developer.mozilla.org/en-US/docs/Web/HTML/Element/iframe#attr-sandbox
 // (3): https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
 
-const IFRAME_SHA256 = "wcqj5QWCo66osdAWDnEgPRFyL7nfe8oNqNggnw4vvW8=";
+const IFRAME_SHA256 = "5TLK/NpT5oNVwJIpse6ISDzNL7qqDFZAmMMo6e9vSSk=";
 
 export function initializeIframeSource(iframe, iframePort, iframeUrl) {
   const url = getIframeUrl(iframePort, iframeUrl);
 
   return verifyIframeSource(url).then(() => {
     iframe.sandbox =
-      "allow-scripts allow-same-origin allow-downloads allow-forms allow-modals allow-popups allow-top-navigation";
+      "allow-scripts allow-same-origin allow-downloads allow-forms allow-modals allow-popups allow-top-navigation-by-user-activation";
     iframe.allow =
-      "accelerometer; ambient-light-sensor; camera; display-capture; encrypted-media; fullscreen; geolocation; gyroscope; microphone; midi; usb; xr-spatial-tracking; clipboard-read; clipboard-write; bluetooth; serial";
+      "accelerometer; ambient-light-sensor; camera; display-capture; encrypted-media; fullscreen; geolocation; gyroscope; microphone; midi; usb; xr-spatial-tracking; clipboard-read; clipboard-write; bluetooth; serial; local-network-access";
     iframe.src = url;
   });
 }
@@ -48,8 +48,8 @@ function getIframeUrl(iframePort, iframeUrl) {
   }
 
   return protocol === "https:"
-    ? "https://livebookusercontent.com/iframe/v5.html"
-    : `http://${window.location.hostname}:${iframePort}/iframe/v5.html`;
+    ? "https://livebookusercontent.com/iframe/v6.html"
+    : `http://${window.location.hostname}:${iframePort}/iframe/v6.html`;
 }
 
 let iframeVerificationPromise = null;

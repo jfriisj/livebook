@@ -66,6 +66,11 @@ message DeploymentGroup {
   string url = 9;
   repeated EnvironmentVariable environment_variables = 10;
   bool teams_auth = 11;
+  repeated AuthorizationGroup authorization_groups = 12;
+  bool groups_auth = 13;
+  bool deploy_auth = 14;
+  repeated DeploymentUser deployment_users = 15;
+  int32 deployed_apps_counter = 16;
 }
 
 message DeploymentGroupCreated {
@@ -91,10 +96,19 @@ message DeploymentGroupUpdated {
   string url = 8;
   repeated EnvironmentVariable environment_variables = 9;
   bool teams_auth = 10;
+  repeated AuthorizationGroup authorization_groups = 11;
+  bool groups_auth = 12;
+  bool deploy_auth = 13;
+  repeated DeploymentUser deployment_users = 14;
 }
 
 message DeploymentGroupDeleted {
   string id = 1;
+}
+
+message DeploymentStatusUpdated {
+  string id = 1;
+  int32 deployed_apps_counter = 2;
 }
 
 message AgentKey {
@@ -111,6 +125,9 @@ message UserConnected {
   repeated AppDeployment app_deployments = 5;
   repeated Agent agents = 6;
   BillingStatus billing_status = 7;
+  repeated AppFolder app_folders = 8;
+  repeated Notification notifications = 9;
+  string min_version_enforcement = 10;
 }
 
 message AgentConnected {
@@ -123,6 +140,9 @@ message AgentConnected {
   repeated AppDeployment app_deployments = 8;
   repeated Agent agents = 9;
   BillingStatus billing_status = 10;
+  repeated AppFolder app_folders = 11;
+  repeated Notification notifications = 12;
+  string min_version_enforcement = 13;
 }
 
 message AppDeployment {
@@ -137,6 +157,8 @@ message AppDeployment {
   bool multi_session = 9;
   string access_type = 10;
   string version = 11;
+  repeated AuthorizationGroup authorization_groups = 12;
+  string app_folder_id = 13;
 }
 
 message AppDeploymentStarted {
@@ -145,6 +167,10 @@ message AppDeploymentStarted {
 
 message AppDeploymentStopped {
   string id = 1;
+}
+
+message AppDeploymentUpdated {
+  AppDeployment app_deployment = 1;
 }
 
 message UserDeleted {
@@ -199,6 +225,40 @@ message EnvironmentVariable {
   string value = 2;
 }
 
+message AuthorizationGroup {
+  string provider_id = 1;
+  string group_name = 2;
+  string app_folder_id = 3;
+}
+
+message DeploymentUser {
+  string user_id = 1;
+  string deployment_group_id = 2;
+}
+
+message AppFolderCreated {
+  AppFolder app_folder = 1;
+}
+
+message AppFolderUpdated {
+  AppFolder app_folder = 1;
+}
+
+message AppFolderDeleted {
+  string id = 1;
+}
+
+message AppFolder {
+  string id = 1;
+  string name = 2;
+}
+
+message Notification {
+  string id = 1;
+  string message = 2;
+  string kind = 3;
+}
+
 message Event {
   oneof type {
     SecretCreated secret_created = 1;
@@ -218,6 +278,11 @@ message Event {
     AgentLeft agent_left = 15;
     AppDeploymentStopped app_deployment_stopped = 16;
     OrgUpdated org_updated = 17;
+    AppDeploymentUpdated app_deployment_updated = 18;
+    AppFolderCreated app_folder_created = 19;
+    AppFolderUpdated app_folder_updated = 20;
+    AppFolderDeleted app_folder_deleted = 21;
+    DeploymentStatusUpdated deployment_status_updated = 22;
   }
 }
 
@@ -243,5 +308,4 @@ message BillingStatusCanceling {
   int64 cancel_at = 1;
 }
 
-message BillingStatusCanceled {
-}
+message BillingStatusCanceled {}

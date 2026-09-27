@@ -14,7 +14,7 @@ defmodule LivebookWeb.IframeEndpoint do
     ]
 
   @doc false
-  def static_from(), do: Path.join(Livebook.Config.priv_path(), "iframe_static")
+  def static_from(), do: Path.join(Livebook.Config.priv_path(), "static/iframe")
 
   plug :not_found
 
@@ -27,10 +27,9 @@ defmodule LivebookWeb.IframeEndpoint do
   """
   @spec port() :: pos_integer()
   def port() do
-    livebook_port = Livebook.Config.port()
     iframe_port = Livebook.Config.iframe_port()
 
-    case livebook_port do
+    case iframe_port do
       0 ->
         try do
           ThousandIsland.listener_info(__MODULE__)

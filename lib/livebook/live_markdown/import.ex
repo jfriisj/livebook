@@ -13,6 +13,8 @@ defmodule Livebook.LiveMarkdown.Import do
     {notebook, valid_hub?, build_messages} = build_notebook(elements)
     {notebook, postprocess_messages} = postprocess_notebook(notebook)
 
+    has_stamp? = stamp_data != nil
+
     {notebook, stamp_verified?, metadata_messages} =
       if stamp_data != nil and valid_hub? do
         postprocess_stamp(notebook, markdown, stamp_data)
@@ -24,7 +26,7 @@ defmodule Livebook.LiveMarkdown.Import do
       earmark_messages ++
         rewrite_messages ++ build_messages ++ postprocess_messages ++ metadata_messages
 
-    {notebook, %{warnings: messages, stamp_verified?: stamp_verified?}}
+    {notebook, %{warnings: messages, has_stamp?: has_stamp?, stamp_verified?: stamp_verified?}}
   end
 
   defp earmark_message_to_string({_severity, line_number, message}) do
@@ -162,9 +164,11 @@ defmodule Livebook.LiveMarkdown.Import do
          [{"pre", _, [{"code", [{"class", language}], [source], %{}}], %{}} | ast],
          elems
        )
-       when language in ["elixir", "erlang"] do
+       when language in ["elixir", "erlang", "python", "pyproject.toml"] do
     {outputs, ast} = take_outputs(ast, [])
+
     language = String.to_atom(language)
+
     group_elements(ast, [{:cell, :code, language, source, outputs} | elems])
   end
 
@@ -244,7 +248,7 @@ defmodule Livebook.LiveMarkdown.Import do
     {outputs, output_counter} = Notebook.index_outputs(outputs, output_counter)
     %{"kind" => kind, "attrs" => attrs} = data
 
-    attrs =
+    smart_cell_attrs =
       case attrs do
         # Import map attributes for backward compatibility
         %{} ->
@@ -255,15 +259,18 @@ defmodule Livebook.LiveMarkdown.Import do
       end
 
     chunks = if(chunks = data["chunks"], do: Enum.map(chunks, &List.to_tuple/1))
+    attrs = cell_metadata_to_attrs(:smart, data)
 
-    cell = %{
-      Notebook.Cell.new(:smart)
-      | source: source,
-        chunks: chunks,
-        outputs: outputs,
-        kind: kind,
-        attrs: attrs
-    }
+    cell =
+      %{
+        Notebook.Cell.new(:smart)
+        | source: source,
+          chunks: chunks,
+          outputs: outputs,
+          kind: kind,
+          attrs: smart_cell_attrs
+      }
+      |> Map.merge(attrs)
 
     build_notebook(elems, [cell | cells], sections, messages, output_counter)
   end
@@ -358,13 +365,22 @@ defmodule Livebook.LiveMarkdown.Import do
          messages ++ [@unknown_hub_message]}
       end
 
-    # We identify a single leading cell as the setup cell, in any
-    # other case all extra cells are put in a default section
-    {setup_cell, extra_sections} =
+    # Check if the remaining cells form a valid setup section, otherwise
+    # we put them into a default section instead
+    {setup_cells, extra_sections} =
       case cells do
-        [] -> {nil, []}
-        [%Notebook.Cell.Code{} = setup_cell] when name != nil -> {setup_cell, []}
-        extra_cells -> {nil, [%{Notebook.Section.new() | cells: extra_cells}]}
+        [%Notebook.Cell.Code{language: :elixir}] when name != nil ->
+          {cells, []}
+
+        [%Notebook.Cell.Code{language: :elixir}, %Notebook.Cell.Code{language: :"pyproject.toml"}]
+        when name != nil ->
+          {cells, []}
+
+        [] ->
+          {nil, []}
+
+        extra_cells ->
+          {nil, [%{Notebook.Section.new() | cells: extra_cells}]}
       end
 
     notebook =
@@ -375,7 +391,7 @@ defmodule Livebook.LiveMarkdown.Import do
           output_counter: output_counter
       }
       |> maybe_put_name(name)
-      |> maybe_put_setup_cell(setup_cell)
+      |> maybe_put_setup_cells(setup_cells)
       |> Map.merge(attrs)
 
     {notebook, valid_hub?, messages}
@@ -384,8 +400,8 @@ defmodule Livebook.LiveMarkdown.Import do
   defp maybe_put_name(notebook, nil), do: notebook
   defp maybe_put_name(notebook, name), do: %{notebook | name: name}
 
-  defp maybe_put_setup_cell(notebook, nil), do: notebook
-  defp maybe_put_setup_cell(notebook, cell), do: Notebook.put_setup_cell(notebook, cell)
+  defp maybe_put_setup_cells(notebook, nil), do: notebook
+  defp maybe_put_setup_cells(notebook, cells), do: Notebook.put_setup_cells(notebook, cells)
 
   # Takes optional leading metadata JSON object and returns {metadata, rest}.
   defp grab_metadata([{:metadata, metadata} | elems]) do
@@ -484,6 +500,9 @@ defmodule Livebook.LiveMarkdown.Import do
       {"show_source", show_source}, attrs ->
         Map.put(attrs, :show_source, show_source)
 
+      {"app_folder_id", app_folder_id}, attrs ->
+        Map.put(attrs, :app_folder_id, app_folder_id)
+
       {"output_type", output_type}, attrs when output_type in ["all", "rich"] ->
         Map.put(attrs, :output_type, String.to_atom(output_type))
 
@@ -492,8 +511,11 @@ defmodule Livebook.LiveMarkdown.Import do
     end)
   end
 
-  defp file_entry_metadata_to_attrs(%{"type" => "attachment", "name" => name}) do
-    {:ok, %{type: :attachment, name: name}}
+  defp file_entry_metadata_to_attrs(%{"type" => "attachment", "name" => name})
+       when is_binary(name) do
+    with :ok <- validate_file_entry_name(name) do
+      {:ok, %{type: :attachment, name: name}}
+    end
   end
 
   defp file_entry_metadata_to_attrs(%{
@@ -504,23 +526,38 @@ defmodule Livebook.LiveMarkdown.Import do
            "file_system_type" => file_system_type,
            "path" => path
          }
-       }) do
-    file = %Livebook.FileSystem.File{
-      file_system_id: file_system_id,
-      file_system_module: Livebook.FileSystems.type_to_module(file_system_type),
-      path: path,
-      origin_pid: self()
-    }
+       })
+       when is_binary(name) and is_binary(file_system_id) and is_binary(file_system_type) and
+              is_binary(path) do
+    with :ok <- validate_file_entry_name(name) do
+      file = %Livebook.FileSystem.File{
+        file_system_id: file_system_id,
+        file_system_module: Livebook.FileSystems.type_to_module(file_system_type),
+        path: path,
+        origin_pid: self()
+      }
 
-    {:ok, %{type: :file, name: name, file: file}}
+      {:ok, %{type: :file, name: name, file: file}}
+    end
   end
 
-  defp file_entry_metadata_to_attrs(%{"type" => "url", "name" => name, "url" => url}) do
-    {:ok, %{type: :url, name: name, url: url}}
+  defp file_entry_metadata_to_attrs(%{"type" => "url", "name" => name, "url" => url})
+       when is_binary(name) and is_binary(url) do
+    with :ok <- validate_file_entry_name(name) do
+      {:ok, %{type: :url, name: name, url: url}}
+    end
   end
 
   defp file_entry_metadata_to_attrs(_other) do
     {:error, "discarding file entry in invalid format"}
+  end
+
+  defp validate_file_entry_name(name) do
+    if Notebook.valid_file_entry_name?(name) do
+      :ok
+    else
+      {:error, "discarding file entry with invalid name: #{inspect(name)}"}
+    end
   end
 
   defp section_metadata_to_attrs(metadata) do
@@ -542,6 +579,19 @@ defmodule Livebook.LiveMarkdown.Import do
 
       {"continue_on_error", continue_on_error}, attrs ->
         Map.put(attrs, :continue_on_error, continue_on_error)
+
+      {"output_size", output_size}, attrs when output_size in ["full", "wide"] ->
+        Map.put(attrs, :output_size, String.to_atom(output_size))
+
+      _entry, attrs ->
+        attrs
+    end)
+  end
+
+  defp cell_metadata_to_attrs(:smart, metadata) do
+    Enum.reduce(metadata, %{}, fn
+      {"output_size", output_size}, attrs when output_size in ["full", "wide"] ->
+        Map.put(attrs, :output_size, String.to_atom(output_size))
 
       _entry, attrs ->
         attrs
@@ -675,7 +725,11 @@ defmodule Livebook.LiveMarkdown.Import do
     end
   end
 
-  defp apply_stamp_metadata(notebook, metadata) do
+  @doc """
+  Updates notebook with metadata map decrypted from notebook stamp.
+  """
+  @spec apply_stamp_metadata(Notebook.t(), map()) :: Notebook.t()
+  def apply_stamp_metadata(notebook, metadata) do
     Enum.reduce(metadata, notebook, fn
       {:hub_secret_names, hub_secret_names}, notebook ->
         %{notebook | hub_secret_names: hub_secret_names}

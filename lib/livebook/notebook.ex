@@ -29,7 +29,9 @@ defmodule Livebook.Notebook do
     :deployment_group_id
   ]
 
-  alias Livebook.Notebook.{Section, Cell, AppSettings}
+  alias Livebook.Notebook
+  alias Livebook.Notebook.Section
+  alias Livebook.Notebook.Cell
   alias Livebook.FileSystem
   alias Livebook.Utils.Graph
   import Livebook.Utils, only: [access_by_id: 1]
@@ -41,13 +43,13 @@ defmodule Livebook.Notebook do
           leading_comments: list(list(line :: String.t())),
           persist_outputs: boolean(),
           autosave_interval_s: non_neg_integer() | nil,
-          default_language: :elixir | :erlang,
+          default_language: :elixir | :erlang | :python,
           output_counter: non_neg_integer(),
-          app_settings: AppSettings.t(),
+          app_settings: Notebook.AppSettings.t(),
           hub_id: String.t(),
           hub_secret_names: list(String.t()),
           file_entries: list(file_entry()),
-          quarantine_file_entry_names: MapSet.new(String.t()),
+          quarantine_file_entry_names: MapSet.t(),
           teams_enabled: boolean(),
           deployment_group_id: String.t() | nil
         }
@@ -86,7 +88,7 @@ defmodule Livebook.Notebook do
           | %{
               name: String.t(),
               type: :file,
-              file: Livebook.FileSystem.File.t()
+              file: FileSystem.File.t()
             }
           | %{
               name: String.t(),
@@ -108,7 +110,7 @@ defmodule Livebook.Notebook do
       autosave_interval_s: default_autosave_interval_s(),
       default_language: :elixir,
       output_counter: 0,
-      app_settings: AppSettings.new(),
+      app_settings: Notebook.AppSettings.new(),
       hub_id: Livebook.Hubs.Personal.id(),
       hub_secret_names: [],
       file_entries: [],
@@ -116,15 +118,62 @@ defmodule Livebook.Notebook do
       teams_enabled: false,
       deployment_group_id: nil
     }
-    |> put_setup_cell(Cell.new(:code))
+    |> put_setup_cells([Cell.new(:code)])
   end
 
   @doc """
-  Sets the given cell as the setup cell.
+  Sets the given cells as the setup section cells.
   """
-  @spec put_setup_cell(t(), Cell.Code.t()) :: t()
-  def put_setup_cell(notebook, %Cell.Code{} = cell) do
-    put_in(notebook.setup_section.cells, [%{cell | id: Cell.setup_cell_id()}])
+  @spec put_setup_cells(t(), list(Cell.Code.t())) :: t()
+  def put_setup_cells(notebook, [main_setup_cell | setup_cells]) do
+    put_in(notebook.setup_section.cells, [
+      %{main_setup_cell | id: Cell.main_setup_cell_id()}
+      | Enum.map(setup_cells, &%{&1 | id: Cell.extra_setup_cell_id(&1.language)})
+    ])
+  end
+
+  @doc """
+  Returns the list of languages used by the notebook.
+  """
+  @spec enabled_languages(t()) :: list(atom())
+  def enabled_languages(notebook) do
+    python_setup_cell_id = Cell.extra_setup_cell_id(:"pyproject.toml")
+    python_enabled? = Enum.any?(notebook.setup_section.cells, &(&1.id == python_setup_cell_id))
+    if(python_enabled?, do: [:python], else: []) ++ [:elixir, :erlang]
+  end
+
+  @doc """
+  Adds extra setup cell specific to the given language.
+  """
+  @spec add_extra_setup_cell(t(), atom()) :: t()
+  def add_extra_setup_cell(notebook, language)
+
+  def add_extra_setup_cell(notebook, :python) do
+    cell = %{
+      Cell.new(:code)
+      | id: Cell.extra_setup_cell_id(:"pyproject.toml"),
+        language: :"pyproject.toml",
+        source: """
+        [project]
+        name = "project"
+        version = "0.0.0"
+        requires-python = "==3.13.*"
+        dependencies = []\
+        """
+    }
+
+    update_in(notebook.setup_section.cells, &(&1 ++ [cell]))
+  end
+
+  @doc """
+  Retrieves extra setup cell specific to the given language.
+  """
+  @spec get_extra_setup_cell(t(), atom()) :: Cell.Code.t()
+  def get_extra_setup_cell(notebook, language)
+
+  def get_extra_setup_cell(notebook, :python) do
+    id = Cell.extra_setup_cell_id(:"pyproject.toml")
+    Enum.find(notebook.setup_section.cells, &(&1.id == id))
   end
 
   @doc """
@@ -272,7 +321,7 @@ defmodule Livebook.Notebook do
   def delete_cell(notebook, cell_id) do
     {_, notebook} =
       pop_in(notebook, [
-        Access.key(:sections),
+        access_all_sections(),
         Access.all(),
         Access.key(:cells),
         access_by_id(cell_id)
@@ -343,81 +392,86 @@ defmodule Livebook.Notebook do
   end
 
   @doc """
-  Moves cell by the given offset.
-
-  The cell may move to another section if the offset indicates so.
+  Moves cell to the given location given by section id and index.
   """
-  @spec move_cell(t(), Cell.id(), integer()) :: t()
-  def move_cell(notebook, cell_id, offset) do
-    # We firstly create a flat list of cells interspersed with `:separator`
-    # at section boundaries. Then we move the given cell by the given offset.
-    # Finally we split the flat list back into cell lists
-    # and put them in the corresponding sections.
+  @spec move_cell(t(), Cell.id(), Section.id(), integer()) :: t()
+  def move_cell(notebook, cell_id, section_id, index) do
+    case fetch_cell_and_section(notebook, cell_id) do
+      {:ok, cell, section} ->
+        index =
+          if section.id == section_id do
+            current_idx = Enum.find_index(section.cells, &(&1.id == cell_id))
 
-    separated_cells =
-      notebook.sections
-      |> Enum.map_intersperse(:separator, & &1.cells)
-      |> List.flatten()
+            if index >= current_idx do
+              # If the position is in the same section after the current
+              # position, we need to adjust it to account for the delete
+              # that we do first.
+              index - 1
+            else
+              index
+            end
+          else
+            index
+          end
 
-    idx =
-      Enum.find_index(separated_cells, fn
-        :separator -> false
-        cell -> cell.id == cell_id
-      end)
+        notebook
+        |> delete_cell(cell_id)
+        |> insert_cell(section_id, index, cell)
 
-    new_idx = (idx + offset) |> clamp_index(separated_cells)
-
-    {cell, separated_cells} = List.pop_at(separated_cells, idx)
-    separated_cells = List.insert_at(separated_cells, new_idx, cell)
-
-    cell_groups = group_cells(separated_cells)
-
-    sections =
-      notebook.sections
-      |> Enum.zip(cell_groups)
-      |> Enum.map(fn {section, cells} -> %{section | cells: cells} end)
-
-    %{notebook | sections: sections}
-  end
-
-  defp group_cells(separated_cells) do
-    separated_cells
-    |> Enum.reverse()
-    |> do_group_cells([])
-  end
-
-  defp do_group_cells([], groups), do: groups
-
-  defp do_group_cells([:separator | separated_cells], []) do
-    do_group_cells(separated_cells, [[], []])
-  end
-
-  defp do_group_cells([:separator | separated_cells], groups) do
-    do_group_cells(separated_cells, [[] | groups])
-  end
-
-  defp do_group_cells([cell | separated_cells], []) do
-    do_group_cells(separated_cells, [[cell]])
-  end
-
-  defp do_group_cells([cell | separated_cells], [group | groups]) do
-    do_group_cells(separated_cells, [[cell | group] | groups])
-  end
-
-  defp clamp_index(index, list) do
-    index |> max(0) |> min(length(list) - 1)
+      :error ->
+        notebook
+    end
   end
 
   @doc """
-  Checks if `section` can be moved by `offset`.
+  Returns the target position when moving the given cell by `offset`,
+  or `nil` if not possible.
+  """
+  @spec cell_move_position(t(), Cell.id(), Section.t(), -1 | 1) ::
+          {Section.id(), integer()} | nil
+  def cell_move_position(notebook, cell_id, section, -1) do
+    cell_idx = Enum.find_index(section.cells, &(&1.id == cell_id))
+
+    if cell_idx > 0 do
+      {section.id, cell_idx - 1}
+    else
+      if prev_section = prev_section(notebook.sections, section.id) do
+        {prev_section.id, length(prev_section.cells) - 1}
+      end
+    end
+  end
+
+  def cell_move_position(notebook, cell_id, section, 1) do
+    cell_idx = Enum.find_index(section.cells, &(&1.id == cell_id))
+    num_cells = length(section.cells)
+
+    if cell_idx + 2 <= num_cells do
+      {section.id, cell_idx + 2}
+    else
+      if next_section = next_section(notebook.sections, section.id) do
+        {next_section.id, 0}
+      end
+    end
+  end
+
+  defp prev_section([%{id: section_id} | _sections], section_id), do: nil
+  defp prev_section([section, %{id: section_id} | _sections], section_id), do: section
+  defp prev_section([_section | sections], section_id), do: prev_section(sections, section_id)
+
+  defp next_section([%{id: section_id}], section_id), do: nil
+  defp next_section([%{id: section_id}, section | _sections], section_id), do: section
+  defp next_section([_section | sections], section_id), do: next_section(sections, section_id)
+
+  @doc """
+  Checks if `section` can be moved to the given index.
 
   Specifically, this function checks if after the move
   all child sections are still below their parent sections.
   """
-  @spec can_move_section_by?(t(), Section.t(), integer()) :: boolean()
-  def can_move_section_by?(notebook, section, offset)
+  @spec can_move_section_to?(t(), Section.t(), integer()) :: boolean()
+  def can_move_section_to?(notebook, section, index)
 
-  def can_move_section_by?(notebook, %{parent_id: nil} = section, offset) do
+  def can_move_section_to?(notebook, %{parent_id: nil} = section, index) do
     notebook.sections
     |> Enum.with_index()
     |> Enum.filter(fn {that_section, _idx} -> that_section.parent_id == section.id end)
@@ -427,15 +481,28 @@ defmodule Livebook.Notebook do
         true
 
       child_indices ->
-        section_idx = section_index(notebook, section.id)
-        section_idx + offset < Enum.min(child_indices)
+        index < Enum.min(child_indices)
     end
   end
 
-  def can_move_section_by?(notebook, section, offset) do
+  def can_move_section_to?(notebook, section, index) do
     parent_idx = section_index(notebook, section.parent_id)
-    section_idx = section_index(notebook, section.id)
-    parent_idx < section_idx + offset
+    parent_idx < index
+  end
+
+  @doc """
+  Returns the target index when moving the given section by `offset`,
+  or `nil` if not possible.
+  """
+  @spec section_move_position(t(), Section.id(), -1 | 1) :: integer() | nil
+  def section_move_position(notebook, section_id, -1) do
+    idx = section_index(notebook, section_id)
+    if idx > 0, do: idx - 1
+  end
+
+  def section_move_position(notebook, section_id, 1) do
+    idx = section_index(notebook, section_id)
+    if idx + 2 <= length(notebook.sections), do: idx + 2
   end
 
   @doc """
@@ -449,20 +516,21 @@ defmodule Livebook.Notebook do
   end
 
   @doc """
-  Moves section by the given offset.
+  Moves section to the given index.
   """
   @spec move_section(t(), Section.id(), integer()) :: t()
-  def move_section(notebook, section_id, offset) do
-    # We first find the index of the given section.
-    # Then we find its' new index from given offset.
-    # Finally, we move the section, and return the new notebook.
-
+  def move_section(notebook, section_id, index) do
     idx = section_index(notebook, section_id)
-    new_idx = (idx + offset) |> clamp_index(notebook.sections)
+
+    index =
+      if index > idx do
+        index - 1
+      else
+        index
+      end
 
     {section, sections} = List.pop_at(notebook.sections, idx)
-    sections = List.insert_at(sections, new_idx, section)
-
+    sections = List.insert_at(sections, index, section)
     %{notebook | sections: sections}
   end
 
@@ -791,7 +859,7 @@ defmodule Livebook.Notebook do
   Recursively adds index to all outputs, including frames.
   """
   @spec index_outputs(list(Livebook.Runtime.output()), non_neg_integer()) ::
-          {list(Cell.index_output()), non_neg_integer()}
+          {list(Cell.indexed_output()), non_neg_integer()}
   def index_outputs(outputs, counter) do
     Enum.map_reduce(outputs, counter, &index_output/2)
   end
@@ -898,16 +966,33 @@ defmodule Livebook.Notebook do
     do_prune_outputs(outputs, appendable?, acc)
   end
 
+  @file_entry_name_regex ~r/\A[\w\-\.]+\z/
+  @file_entry_name_extension_regex ~r/\.\w+\z/
+
   @doc """
   Validates a change is a valid file entry name.
   """
   @spec validate_file_entry_name(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
   def validate_file_entry_name(changeset, field) do
     changeset
-    |> Ecto.Changeset.validate_format(field, ~r/^[\w-.]+$/,
+    |> Ecto.Changeset.validate_format(field, @file_entry_name_regex,
       message: "should contain only alphanumeric characters, dash, underscore and dot"
     )
-    |> Ecto.Changeset.validate_format(field, ~r/\.\w+$/, message: "should end with an extension")
+    |> Ecto.Changeset.validate_format(field, @file_entry_name_extension_regex,
+      message: "should end with an extension"
+    )
+  end
+
+  @doc """
+  Checks if the given term is a valid file entry name.
+
+  File entry names are flat logical file names, they must not include
+  path separators, so that they can be safely resolved against the
+  notebook files directory.
+  """
+  @spec valid_file_entry_name?(String.t()) :: boolean()
+  def valid_file_entry_name?(name) when is_binary(name) do
+    name =~ @file_entry_name_regex and name =~ @file_entry_name_extension_regex
   end
 
   @doc """

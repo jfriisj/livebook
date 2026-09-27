@@ -10,6 +10,11 @@ defmodule LivebookWeb.OpenLive.FileComponent do
   end
 
   @impl true
+  def update(%{event: {:mount_file_system, file_system}}, socket) do
+    :ok = FileSystem.mount(file_system)
+    {:ok, socket}
+  end
+
   def update(%{event: {:set_file, file, info}}, socket) do
     file_info = %{exists: info.exists, access: file_access(file)}
     {:ok, assign(socket, file: file, file_info: file_info)}
@@ -34,7 +39,9 @@ defmodule LivebookWeb.OpenLive.FileComponent do
         file={@file}
         extnames={[LiveMarkdown.extension()]}
         running_files={files(@sessions)}
+        writable={writable?(@file_info)}
         target={{__MODULE__, @id}}
+        file_systems={@file_systems}
       >
         <div class="flex justify-end space-x-2">
           <.button
@@ -70,7 +77,10 @@ defmodule LivebookWeb.OpenLive.FileComponent do
 
   defp open_button_tooltip_attrs(file, file_info) do
     if regular?(file, file_info) and not writable?(file_info) do
-      [class: "tooltip top", "data-tooltip": "This file is write-protected, please fork instead"]
+      [
+        class: "tooltip top",
+        "data-tooltip": "This file is write-protected, fork to create an editable copy"
+      ]
     else
       []
     end

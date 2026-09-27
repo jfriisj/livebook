@@ -3,9 +3,6 @@ defmodule LivebookWeb.HomeLive do
 
   import LivebookWeb.SessionHelpers
 
-  alias LivebookWeb.LayoutComponents
-  alias Livebook.{Sessions, Notebook}
-
   on_mount LivebookWeb.SidebarHook
 
   @impl true
@@ -16,8 +13,8 @@ defmodule LivebookWeb.HomeLive do
       Livebook.NotebookManager.subscribe_starred_notebooks()
     end
 
-    sessions = Sessions.list_sessions() |> Enum.filter(&(&1.mode == :default))
-    notebook_infos = Notebook.Learn.visible_notebook_infos() |> Enum.take(3)
+    sessions = Livebook.Sessions.list_sessions() |> Enum.filter(&(&1.mode == :default))
+    notebook_infos = Livebook.Notebook.Learn.visible_notebook_infos() |> Enum.take(3)
     starred_notebooks = Livebook.NotebookManager.starred_notebooks()
 
     {:ok,
@@ -38,10 +35,14 @@ defmodule LivebookWeb.HomeLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <LayoutComponents.layout
+    <Layouts.layout
+      flash={@flash}
+      confirm_state={@confirm_state}
       current_page={@self_path}
       current_user={@current_user}
+      teams_auth={@teams_auth}
       saved_hubs={@saved_hubs}
+      notifications={@notifications}
     >
       <:topbar_action>
         <div class="flex space-x-2">
@@ -58,9 +59,9 @@ defmodule LivebookWeb.HomeLive do
       <.update_notification version={@new_version} instructions_url={@update_instructions_url} />
       <.memory_notification memory={@memory} app_service_url={@app_service_url} />
 
-      <div class="p-4 md:px-12 md:py-6 max-w-screen-lg mx-auto">
+      <div class="p-4 md:px-12 md:py-6 max-w-(--breakpoint-lg) mx-auto">
         <div class="flex flex-row space-y-0 items-center pb-4 justify-between">
-          <LayoutComponents.title text="Home" />
+          <.title text="Home" />
           <div class="hidden md:flex space-x-2" role="navigation" aria-label="new notebook">
             <.button color="gray" outlined navigate={~p"/open/storage"}>
               Open
@@ -142,7 +143,7 @@ defmodule LivebookWeb.HomeLive do
           />
         </div>
       </div>
-    </LayoutComponents.layout>
+    </Layouts.layout>
 
     <.modal :if={@live_action == :import} id="import-modal" show width="big" patch={@self_path}>
       <.live_component
@@ -159,7 +160,7 @@ defmodule LivebookWeb.HomeLive do
 
   defp update_notification(assigns) do
     ~H"""
-    <LayoutComponents.topbar>
+    <Layouts.topbar>
       <span>
         Livebook v{@version} available!
         <%= if @instructions_url do %>
@@ -191,13 +192,13 @@ defmodule LivebookWeb.HomeLive do
         <% end %>
         🚀
       </span>
-    </LayoutComponents.topbar>
+    </Layouts.topbar>
     """
   end
 
   defp memory_notification(assigns) do
     ~H"""
-    <LayoutComponents.topbar :if={@app_service_url && @memory.free < 30_000_000} variant="error">
+    <Layouts.topbar :if={@app_service_url && @memory.free < 30_000_000} variant="error">
       <.remix_icon icon="alarm-warning-line" class="align-text-bottom mr-0.5" />
       Less than 30 MB of memory left, consider
       <a
@@ -214,7 +215,7 @@ defmodule LivebookWeb.HomeLive do
       >
         running sessions
       </a>
-    </LayoutComponents.topbar>
+    </Layouts.topbar>
     """
   end
 
@@ -225,7 +226,7 @@ defmodule LivebookWeb.HomeLive do
   end
 
   def handle_params(%{}, _url, socket) when socket.assigns.live_action == :public_new_notebook do
-    {:noreply, create_session(socket, queue_setup: true)}
+    {:noreply, create_session(socket, connect_runtime: true)}
   end
 
   def handle_params(_params, _url, socket), do: {:noreply, socket}

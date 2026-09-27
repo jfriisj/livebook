@@ -3,8 +3,7 @@ defmodule LivebookWeb.OpenLive do
 
   import LivebookWeb.SessionHelpers
 
-  alias LivebookWeb.LayoutComponents
-  alias Livebook.{Sessions, Notebook, FileSystem}
+  alias Livebook.FileSystem
 
   on_mount LivebookWeb.SidebarHook
 
@@ -13,10 +12,12 @@ defmodule LivebookWeb.OpenLive do
     if connected?(socket) do
       Livebook.Sessions.subscribe()
       Livebook.NotebookManager.subscribe_recent_notebooks()
+      Livebook.Hubs.Broadcasts.subscribe(:file_systems)
     end
 
-    sessions = Sessions.list_sessions() |> Enum.filter(&(&1.mode == :default))
+    sessions = Livebook.Sessions.list_sessions() |> Enum.filter(&(&1.mode == :default))
     recent_notebooks = Livebook.NotebookManager.recent_notebooks()
+    file_systems = Livebook.Hubs.get_file_systems()
 
     show_autosave_note? =
       case Livebook.Settings.autosave_path() do
@@ -32,17 +33,22 @@ defmodule LivebookWeb.OpenLive do
        sessions: sessions,
        recent_notebooks: recent_notebooks,
        page_title: "Open - Livebook",
-       show_autosave_note?: show_autosave_note?
+       show_autosave_note?: show_autosave_note?,
+       file_systems: file_systems
      )}
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <LayoutComponents.layout
+    <Layouts.layout
+      flash={@flash}
+      confirm_state={@confirm_state}
       current_page={~p"/"}
       current_user={@current_user}
+      teams_auth={@teams_auth}
       saved_hubs={@saved_hubs}
+      notifications={@notifications}
     >
       <:topbar_action>
         <.button color="blue" navigate={~p"/new"}>
@@ -50,9 +56,10 @@ defmodule LivebookWeb.OpenLive do
           <span>New notebook</span>
         </.button>
       </:topbar_action>
-      <div class="p-4 md:px-12 md:py-6 max-w-screen-lg mx-auto space-y-4">
+
+      <div class="p-4 md:px-12 md:py-6 max-w-(--breakpoint-lg) mx-auto space-y-4">
         <div class="flex flex-row space-y-0 items-center pb-4 justify-between">
-          <LayoutComponents.title text="Open notebook" back_navigate={~p"/"} />
+          <.title text="Open notebook" back_navigate={~p"/"} />
           <div class="hidden md:flex" role="navigation" aria-label="new notebook">
             <.button color="blue" navigate={~p"/new"}>
               <.remix_icon icon="add-line" />
@@ -88,6 +95,7 @@ defmodule LivebookWeb.OpenLive do
             id="import-file"
             sessions={@sessions}
             initial_file={@initial_file}
+            file_systems={@file_systems}
           />
           <.live_component
             :if={@tab == "url"}
@@ -147,7 +155,7 @@ defmodule LivebookWeb.OpenLive do
           </div>
         </div>
       </div>
-    </LayoutComponents.layout>
+    </Layouts.layout>
     """
   end
 
@@ -158,11 +166,11 @@ defmodule LivebookWeb.OpenLive do
 
   def handle_params(%{"url" => url}, _url, socket)
       when socket.assigns.live_action == :public_import do
-    origin = Notebook.ContentLoader.url_to_location(url)
+    origin = Livebook.Notebook.ContentLoader.url_to_location(url)
     files_url = Livebook.Utils.expand_url(url, "files/")
 
     origin
-    |> Notebook.ContentLoader.fetch_content_from_location()
+    |> Livebook.Notebook.ContentLoader.fetch_content_from_location()
     |> case do
       {:ok, content} ->
         socket = import_source(socket, content, origin: origin, files_source: {:url, files_url})
@@ -232,6 +240,11 @@ defmodule LivebookWeb.OpenLive do
 
   def handle_info({:recent_notebooks_updated, recent_notebooks}, socket) do
     {:noreply, assign(socket, recent_notebooks: recent_notebooks)}
+  end
+
+  def handle_info({type, _}, socket)
+      when type in [:file_system_created, :file_system_updated, :file_system_deleted] do
+    {:noreply, assign(socket, file_systems: Livebook.Hubs.get_file_systems())}
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}

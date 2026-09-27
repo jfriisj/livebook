@@ -18,12 +18,15 @@ defmodule Livebook.Hubs.TeamClient do
     :connection_status,
     :derived_key,
     :deployment_group_id,
+    version_enforcement: nil,
     connected?: false,
     secrets: [],
     file_systems: [],
     deployment_groups: [],
     app_deployments: [],
     agents: [],
+    app_folders: [],
+    notifications: [],
     app_deployment_statuses: nil
   ]
 
@@ -63,6 +66,8 @@ defmodule Livebook.Hubs.TeamClient do
   @spec get_secrets(String.t()) :: list(Secrets.Secret.t())
   def get_secrets(id) do
     GenServer.call(registry_name(id), :get_secrets)
+  catch
+    :exit, _ -> []
   end
 
   @doc """
@@ -71,6 +76,8 @@ defmodule Livebook.Hubs.TeamClient do
   @spec get_file_systems(String.t()) :: list(FileSystem.t())
   def get_file_systems(id) do
     GenServer.call(registry_name(id), :get_file_systems)
+  catch
+    :exit, _ -> []
   end
 
   @doc """
@@ -100,12 +107,22 @@ defmodule Livebook.Hubs.TeamClient do
   end
 
   @doc """
+  Returns an app deployment from given data.
+  """
+  @spec get_app_deployment(String.t(), String.t(), String.t()) :: Teams.AppDeployment.t() | nil
+  def get_app_deployment(id, slug, deployment_group_id) do
+    GenServer.call(registry_name(id), {:get_app_deployment, slug, deployment_group_id})
+  end
+
+  @doc """
   Returns a list of cached app deployments that should be deployed on
   this instance.
   """
   @spec get_agent_app_deployments(String.t()) :: list(Teams.AppDeployment.t())
   def get_agent_app_deployments(id) do
     GenServer.call(registry_name(id), :get_agent_app_deployments)
+  catch
+    :exit, _ -> []
   end
 
   @doc """
@@ -127,19 +144,76 @@ defmodule Livebook.Hubs.TeamClient do
   end
 
   @doc """
-  Returns if the Team client uses Livebook Teams identity provider.
+  Returns the identity status for the Team client.
+
+  Returns `:pending` when the Teams connection has not been established yet,
+  `:enabled` when Teams authentication is enabled, and `:disabled` otherwise.
   """
-  @spec identity_enabled?(String.t()) :: boolean()
-  def identity_enabled?(id) do
-    GenServer.call(registry_name(id), :identity_enabled?)
+  @spec identity_status(String.t()) :: :pending | :enabled | :disabled
+  def identity_status(id) do
+    GenServer.call(registry_name(id), :identity_status)
   end
 
   @doc """
   Returns a list of cached environment variables.
   """
-  @spec get_environment_variables(String.t()) :: list(Teams.Agent.t())
+  @spec get_environment_variables(String.t()) :: list(Teams.EnvironmentVariable.t())
   def get_environment_variables(id) do
     GenServer.call(registry_name(id), :get_environment_variables)
+  end
+
+  @doc """
+  Returns if the given user groups has full access to app server.
+  """
+  @spec user_full_access?(String.t(), list(map())) :: boolean()
+  def user_full_access?(id, groups) do
+    GenServer.call(registry_name(id), {:check_full_access, groups})
+  end
+
+  @doc """
+  Returns if the given user groups has access to given app.
+  """
+  @spec user_app_access?(String.t(), list(map()), String.t()) :: boolean()
+  def user_app_access?(id, groups, slug) do
+    GenServer.call(registry_name(id), {:check_app_access, groups, slug})
+  end
+
+  @doc """
+  Returns if the given user has access to deploy apps to given deployment group.
+  """
+  @spec user_can_deploy?(String.t(), pos_integer() | nil, String.t()) :: boolean()
+  def user_can_deploy?(id, user_id, deployment_group_id) do
+    GenServer.call(registry_name(id), {:user_can_deploy?, user_id, deployment_group_id})
+  end
+
+  @doc """
+  Returns a list of cached app folders.
+  """
+  @spec get_app_folders(String.t()) :: list(Teams.AppFolder.t())
+  def get_app_folders(id) do
+    GenServer.call(registry_name(id), :get_app_folders)
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
+  Returns a list of cached notifications related to this instance.
+  """
+  @spec get_notifications(String.t()) :: list(Teams.Notification.t())
+  def get_notifications(id) do
+    GenServer.call(registry_name(id), :get_notifications)
+  catch
+    :exit, _ -> []
+  end
+
+  @doc """
+  Returns the Team client version enforcement.
+  """
+  @spec version_enforcement(String.t()) :: String.t() | nil
+  def version_enforcement(id) do
+    GenServer.call(registry_name(id), :version_enforcement)
+  catch
+    :exit, _ -> nil
   end
 
   @doc """
@@ -171,7 +245,7 @@ defmodule Livebook.Hubs.TeamClient do
     headers =
       if team.user_id do
         [
-          {"x-lb-version", Livebook.Config.app_version()},
+          {"x-lb-version", app_version()},
           {"x-user", to_string(team.user_id)},
           {"x-org", to_string(team.org_id)},
           {"x-org-key", to_string(team.org_key_id)},
@@ -179,7 +253,7 @@ defmodule Livebook.Hubs.TeamClient do
         ]
       else
         [
-          {"x-lb-version", Livebook.Config.app_version()},
+          {"x-lb-version", app_version()},
           {"x-org", to_string(team.org_id)},
           {"x-org-key", to_string(team.org_key_id)},
           {"x-agent-name", Livebook.Config.agent_name()},
@@ -212,10 +286,6 @@ defmodule Livebook.Hubs.TeamClient do
     {:reply, state.connected?, state}
   end
 
-  def handle_call(:get_secrets, _caller, %{deployment_group_id: nil} = state) do
-    {:reply, state.secrets, state}
-  end
-
   def handle_call(:get_secrets, _caller, state) do
     case find_deployment_group(state.deployment_group_id, state.deployment_groups) do
       nil ->
@@ -236,6 +306,13 @@ defmodule Livebook.Hubs.TeamClient do
 
   def handle_call(:get_app_deployments, _caller, state) do
     {:reply, state.app_deployments, state}
+  end
+
+  def handle_call({:get_app_deployment, slug, deployment_group_id}, _caller, state) do
+    case fetch_app_deployment_from_slug(slug, deployment_group_id, state) do
+      {:ok, app_deployment} -> {:reply, app_deployment, state}
+      state -> {:reply, nil, state}
+    end
   end
 
   def handle_call(:get_agent_app_deployments, _caller, state) do
@@ -269,15 +346,98 @@ defmodule Livebook.Hubs.TeamClient do
     {:reply, environment_variables, state}
   end
 
-  def handle_call(:identity_enabled?, _caller, %{deployment_group_id: nil} = state) do
-    {:reply, false, state}
+  def handle_call(:identity_status, _caller, %{deployment_group_id: nil} = state) do
+    {:reply, :pending, state}
   end
 
-  def handle_call(:identity_enabled?, _caller, %{deployment_group_id: id} = state) do
+  def handle_call(:identity_status, _caller, %{deployment_group_id: id} = state) do
     case fetch_deployment_group(id, state) do
-      {:ok, deployment_group} -> {:reply, deployment_group.teams_auth, state}
-      _ -> {:reply, false, state}
+      {:ok, %{teams_auth: true}} ->
+        {:reply, :enabled, state}
+
+      {:ok, %{teams_auth: false}} ->
+        # We only return disabled if we are certain, otherwise we might
+        # wrongly allow access.
+        {:reply, :disabled, state}
+
+      _not_found ->
+        # We cannot find the deployment group, it may have been deleted,
+        # so we return :pending, similarly to the before-connected case.
+        {:reply, :pending, state}
     end
+  end
+
+  def handle_call({:check_full_access, groups}, _caller, state) do
+    if id = state.deployment_group_id do
+      case fetch_deployment_group(id, state) do
+        {:ok, deployment_group} ->
+          {:reply,
+           not deployment_group.teams_auth or
+             not deployment_group.groups_auth or
+             authorized_group?(deployment_group.authorization_groups, groups), state}
+
+        _ ->
+          {:reply, false, state}
+      end
+    else
+      {:reply, true, state}
+    end
+  end
+
+  def handle_call({:check_app_access, groups, slug}, _caller, state) do
+    if id = state.deployment_group_id do
+      with {:ok, deployment_group} <- fetch_deployment_group(id, state),
+           {:ok, app_deployment} <-
+             fetch_app_deployment_from_slug(slug, deployment_group.id, state) do
+        app_access? =
+          not deployment_group.teams_auth or
+            not deployment_group.groups_auth or
+            (authorized_group?(deployment_group.authorization_groups, groups) or
+               authorized_group?(app_deployment.authorization_groups, groups))
+
+        {:reply, app_access?, state}
+      else
+        _ -> {:reply, false, state}
+      end
+    else
+      {:reply, true, state}
+    end
+  end
+
+  def handle_call({:user_can_deploy?, user_id, id}, _caller, state) do
+    # App servers/Offline instances should not be able to deploy apps
+    if state.deployment_group_id || user_id == nil do
+      {:reply, false, state}
+    else
+      case fetch_deployment_group(id, state) do
+        {:ok, deployment_group} ->
+          deployment_user = %Teams.DeploymentUser{
+            user_id: to_string(user_id),
+            deployment_group_id: id
+          }
+
+          authorized? =
+            not deployment_group.deploy_auth or
+              deployment_user in deployment_group.deployment_users
+
+          {:reply, authorized?, state}
+
+        _ ->
+          {:reply, false, state}
+      end
+    end
+  end
+
+  def handle_call(:get_app_folders, _caller, state) do
+    {:reply, state.app_folders, state}
+  end
+
+  def handle_call(:get_notifications, _caller, state) do
+    {:reply, state.notifications, state}
+  end
+
+  def handle_call(:version_enforcement, _, state) do
+    {:reply, state.version_enforcement, state}
   end
 
   @impl true
@@ -288,6 +448,12 @@ defmodule Livebook.Hubs.TeamClient do
   end
 
   def handle_info({:connection_error, reason}, state) do
+    Hubs.Broadcasts.hub_connection_failed(state.hub.id, reason)
+
+    {:noreply, %{state | connected?: false, connection_status: reason}}
+  end
+
+  def handle_info({:service_unavailable, reason}, state) do
     Hubs.Broadcasts.hub_connection_failed(state.hub.id, reason)
 
     {:noreply, %{state | connected?: false, connection_status: reason}}
@@ -440,6 +606,8 @@ defmodule Livebook.Hubs.TeamClient do
     secrets = Enum.map(deployment_group.secrets, &build_secret(state, &1))
     agent_keys = Enum.map(deployment_group.agent_keys, &build_agent_key/1)
     environment_variables = build_environment_variables(state, deployment_group)
+    authorization_groups = build_authorization_groups(deployment_group)
+    deployment_users = build_deployment_users(deployment_group)
 
     %Teams.DeploymentGroup{
       id: deployment_group.id,
@@ -451,7 +619,12 @@ defmodule Livebook.Hubs.TeamClient do
       environment_variables: environment_variables,
       clustering: nullify(deployment_group.clustering),
       url: nullify(deployment_group.url),
-      teams_auth: deployment_group.teams_auth
+      teams_auth: deployment_group.teams_auth,
+      groups_auth: deployment_group.groups_auth,
+      deploy_auth: deployment_group.deploy_auth,
+      authorization_groups: authorization_groups,
+      deployment_users: deployment_users,
+      deployed_apps_counter: deployment_group.deployed_apps_counter
     }
   end
 
@@ -468,7 +641,10 @@ defmodule Livebook.Hubs.TeamClient do
       environment_variables: [],
       clustering: nullify(deployment_group_created.clustering),
       url: nullify(deployment_group_created.url),
-      teams_auth: deployment_group_created.teams_auth
+      teams_auth: deployment_group_created.teams_auth,
+      authorization_groups: [],
+      deployment_users: [],
+      deployed_apps_counter: 0
     }
   end
 
@@ -476,6 +652,8 @@ defmodule Livebook.Hubs.TeamClient do
     secrets = Enum.map(deployment_group_updated.secrets, &build_secret(state, &1))
     agent_keys = Enum.map(deployment_group_updated.agent_keys, &build_agent_key/1)
     environment_variables = build_environment_variables(state, deployment_group_updated)
+    authorization_groups = build_authorization_groups(deployment_group_updated)
+    deployment_users = build_deployment_users(deployment_group_updated)
 
     {:ok, deployment_group} = fetch_deployment_group(deployment_group_updated.id, state)
 
@@ -487,11 +665,17 @@ defmodule Livebook.Hubs.TeamClient do
         environment_variables: environment_variables,
         clustering: atomize(deployment_group_updated.clustering),
         url: nullify(deployment_group_updated.url),
-        teams_auth: deployment_group_updated.teams_auth
+        teams_auth: deployment_group_updated.teams_auth,
+        groups_auth: deployment_group_updated.groups_auth,
+        deploy_auth: deployment_group_updated.deploy_auth,
+        authorization_groups: authorization_groups,
+        deployment_users: deployment_users
     }
   end
 
   defp build_app_deployment(state, %LivebookProto.AppDeployment{} = app_deployment) do
+    authorization_groups = build_authorization_groups(app_deployment)
+
     %Teams.AppDeployment{
       id: app_deployment.id,
       slug: app_deployment.slug,
@@ -504,7 +688,9 @@ defmodule Livebook.Hubs.TeamClient do
       deployment_group_id: app_deployment.deployment_group_id,
       file: nil,
       deployed_by: app_deployment.deployed_by,
-      deployed_at: DateTime.from_gregorian_seconds(app_deployment.deployed_at)
+      deployed_at: DateTime.from_gregorian_seconds(app_deployment.deployed_at),
+      authorization_groups: authorization_groups,
+      app_folder_id: nullify(app_deployment.app_folder_id)
     }
   end
 
@@ -515,6 +701,25 @@ defmodule Livebook.Hubs.TeamClient do
         value: environment_variable.value,
         hub_id: state.hub.id,
         deployment_group_id: deployment_group_updated.id
+      }
+    end
+  end
+
+  defp build_authorization_groups(%{authorization_groups: authorization_groups}) do
+    for authorization_group <- authorization_groups do
+      %Teams.AuthorizationGroup{
+        provider_id: authorization_group.provider_id,
+        group_name: authorization_group.group_name,
+        app_folder_id: nullify(authorization_group.app_folder_id)
+      }
+    end
+  end
+
+  defp build_deployment_users(%{deployment_users: deployment_users}) do
+    for deployment_user <- deployment_users do
+      %Teams.DeploymentUser{
+        user_id: deployment_user.user_id,
+        deployment_group_id: deployment_user.deployment_group_id
       }
     end
   end
@@ -537,6 +742,47 @@ defmodule Livebook.Hubs.TeamClient do
       org_id: agent.org_id,
       deployment_group_id: agent.deployment_group_id
     }
+  end
+
+  defp put_app_folder(state, app_folder) do
+    state = remove_app_folder(state, app_folder)
+
+    %{state | app_folders: [app_folder | state.app_folders]}
+  end
+
+  defp remove_app_folder(state, app_folder) do
+    %{state | app_folders: Enum.reject(state.app_folders, &(&1.id == app_folder.id))}
+  end
+
+  defp build_app_folder(state, %LivebookProto.AppFolder{} = app_folder) do
+    %Teams.AppFolder{
+      id: app_folder.id,
+      name: app_folder.name,
+      hub_id: state.hub.id
+    }
+  end
+
+  defp build_notification(notification) do
+    kind =
+      if notification.kind in ~w[warning error info],
+        do: notification.kind,
+        else: "info"
+
+    %Teams.Notification{
+      id: notification.id,
+      kind: kind,
+      message: nullify(notification.message)
+    }
+  end
+
+  defp put_notification(state, notification) do
+    state = remove_notification(state, notification)
+
+    %{state | notifications: [notification | state.notifications]}
+  end
+
+  defp remove_notification(state, notification) do
+    %{state | notifications: Enum.reject(state.notifications, &(&1.id == notification.id))}
   end
 
   defp handle_event(:secret_created, %Secrets.Secret{} = secret, state) do
@@ -572,7 +818,6 @@ defmodule Livebook.Hubs.TeamClient do
 
   defp handle_event(:file_system_created, %{external_id: _} = file_system, state) do
     Hubs.Broadcasts.file_system_created(file_system)
-
     put_file_system(state, file_system)
   end
 
@@ -582,7 +827,6 @@ defmodule Livebook.Hubs.TeamClient do
 
   defp handle_event(:file_system_updated, %{external_id: _} = file_system, state) do
     Hubs.Broadcasts.file_system_updated(file_system)
-
     put_file_system(state, file_system)
   end
 
@@ -603,7 +847,6 @@ defmodule Livebook.Hubs.TeamClient do
 
   defp handle_event(:deployment_group_created, %Teams.DeploymentGroup{} = deployment_group, state) do
     Teams.Broadcasts.deployment_group_created(deployment_group)
-
     put_deployment_group(state, deployment_group)
   end
 
@@ -617,6 +860,24 @@ defmodule Livebook.Hubs.TeamClient do
 
   defp handle_event(:deployment_group_updated, %Teams.DeploymentGroup{} = deployment_group, state) do
     Teams.Broadcasts.deployment_group_updated(deployment_group)
+
+    with {:ok, current_deployment_group} <- fetch_deployment_group(deployment_group.id, state) do
+      if state.deployment_group_id == deployment_group.id and
+           (current_deployment_group.authorization_groups !=
+              deployment_group.authorization_groups or
+              current_deployment_group.groups_auth != deployment_group.groups_auth or
+              current_deployment_group.teams_auth != deployment_group.teams_auth) do
+        Teams.Broadcasts.server_authorization_updated(deployment_group)
+      end
+
+      if state.deployment_group_id == nil and
+           (current_deployment_group.deployment_users !=
+              deployment_group.deployment_users or
+              current_deployment_group.deploy_auth != deployment_group.deploy_auth) do
+        Teams.Broadcasts.deployment_users_updated(deployment_group)
+      end
+    end
+
     put_deployment_group(state, deployment_group)
   end
 
@@ -640,36 +901,18 @@ defmodule Livebook.Hubs.TeamClient do
   end
 
   defp handle_event(:user_connected, user_connected, state) do
-    state
-    |> update_hub(user_connected)
-    |> dispatch_secrets(user_connected)
-    |> dispatch_file_systems(user_connected)
-    |> dispatch_deployment_groups(user_connected)
-    |> dispatch_app_deployments(user_connected)
-    |> dispatch_agents(user_connected)
-    |> dispatch_connection()
+    dispatch_common_connected_events(state, user_connected)
   end
 
   defp handle_event(:agent_connected, agent_connected, state) do
-    %{state | deployment_group_id: to_string(agent_connected.deployment_group_id)}
-    |> update_hub(agent_connected)
-    |> dispatch_secrets(agent_connected)
-    |> dispatch_file_systems(agent_connected)
-    |> dispatch_deployment_groups(agent_connected)
-    |> dispatch_app_deployments(agent_connected)
-    |> dispatch_agents(agent_connected)
-    |> dispatch_connection()
+    dispatch_common_connected_events(
+      %{state | deployment_group_id: to_string(agent_connected.deployment_group_id)},
+      agent_connected
+    )
   end
 
   defp handle_event(:app_deployment_started, %Teams.AppDeployment{} = app_deployment, state) do
-    deployment_group_id = app_deployment.deployment_group_id
-
-    with {:ok, deployment_group} <- fetch_deployment_group(deployment_group_id, state) do
-      if deployment_group.id == state.deployment_group_id do
-        manager_sync()
-      end
-    end
-
+    manager_sync(app_deployment, state)
     Teams.Broadcasts.app_deployment_started(app_deployment)
     put_app_deployment(state, app_deployment)
   end
@@ -683,14 +926,7 @@ defmodule Livebook.Hubs.TeamClient do
   end
 
   defp handle_event(:app_deployment_stopped, %Teams.AppDeployment{} = app_deployment, state) do
-    deployment_group_id = app_deployment.deployment_group_id
-
-    with {:ok, deployment_group} <- fetch_deployment_group(deployment_group_id, state) do
-      if deployment_group.id == state.deployment_group_id do
-        manager_sync()
-      end
-    end
-
+    manager_sync(app_deployment, state)
     Teams.Broadcasts.app_deployment_stopped(app_deployment)
     remove_app_deployment(state, app_deployment)
   end
@@ -699,6 +935,33 @@ defmodule Livebook.Hubs.TeamClient do
     with {:ok, app_deployment} <- fetch_app_deployment(id, state) do
       handle_event(:app_deployment_stopped, app_deployment, state)
     end
+  end
+
+  defp handle_event(:app_deployment_updated, %Teams.AppDeployment{} = app_deployment, state) do
+    manager_sync(app_deployment, state)
+    Teams.Broadcasts.app_deployment_updated(app_deployment)
+
+    with {:ok, current_app_deployment} <- fetch_app_deployment(app_deployment.id, state) do
+      if state.deployment_group_id &&
+           (current_app_deployment.app_folder_id !=
+              app_deployment.app_folder_id or
+              current_app_deployment.authorization_groups != app_deployment.authorization_groups) do
+        {:ok, deployment_group} =
+          fetch_deployment_group(app_deployment.deployment_group_id, state)
+
+        Teams.Broadcasts.server_authorization_updated(deployment_group)
+      end
+    end
+
+    put_app_deployment(state, app_deployment)
+  end
+
+  defp handle_event(:app_deployment_updated, app_deployment_updated, state) do
+    handle_event(
+      :app_deployment_updated,
+      build_app_deployment(state, app_deployment_updated.app_deployment),
+      state
+    )
   end
 
   defp handle_event(:agent_joined, %Teams.Agent{} = agent, state) do
@@ -731,6 +994,80 @@ defmodule Livebook.Hubs.TeamClient do
 
   defp handle_event(:org_updated, org_updated, state) do
     update_hub(state, org_updated)
+  end
+
+  defp handle_event(:app_folder_created, %Teams.AppFolder{} = app_folder, state) do
+    Teams.Broadcasts.app_folder_created(app_folder)
+    put_app_folder(state, app_folder)
+  end
+
+  defp handle_event(:app_folder_created, app_folder_created, state) do
+    handle_event(
+      :app_folder_created,
+      build_app_folder(state, app_folder_created.app_folder),
+      state
+    )
+  end
+
+  defp handle_event(:app_folder_updated, %Teams.AppFolder{} = app_folder, state) do
+    Teams.Broadcasts.app_folder_updated(app_folder)
+    put_app_folder(state, app_folder)
+  end
+
+  defp handle_event(:app_folder_updated, app_folder_updated, state) do
+    handle_event(
+      :app_folder_updated,
+      build_app_folder(state, app_folder_updated.app_folder),
+      state
+    )
+  end
+
+  defp handle_event(:app_folder_deleted, %Teams.AppFolder{} = app_folder, state) do
+    Teams.Broadcasts.app_folder_deleted(app_folder)
+    remove_app_folder(state, app_folder)
+  end
+
+  defp handle_event(:app_folder_deleted, %{id: id}, state) do
+    with {:ok, app_folder} <- fetch_app_folder(id, state) do
+      handle_event(:app_folder_deleted, app_folder, state)
+    end
+  end
+
+  defp handle_event(:deployment_status_updated, %{id: id, deployed_apps_counter: counter}, state) do
+    with {:ok, deployment_group} <- fetch_deployment_group(id, state) do
+      deployment_group = %{deployment_group | deployed_apps_counter: counter}
+
+      Teams.Broadcasts.deployment_group_updated(deployment_group)
+      put_deployment_group(state, deployment_group)
+    end
+  end
+
+  defp handle_event(:notification_sent, %Teams.Notification{} = notification, state) do
+    Teams.Broadcasts.notification_sent(notification)
+    put_notification(state, notification)
+  end
+
+  defp handle_event(:notification_updated, %Teams.Notification{} = notification, state) do
+    Teams.Broadcasts.notification_updated(notification)
+    put_notification(state, notification)
+  end
+
+  defp handle_event(:notification_deleted, %Teams.Notification{} = notification, state) do
+    Teams.Broadcasts.notification_deleted(notification)
+    remove_notification(state, notification)
+  end
+
+  defp dispatch_common_connected_events(state, connected) do
+    %{state | version_enforcement: nullify(connected.min_version_enforcement)}
+    |> update_hub(connected)
+    |> dispatch_secrets(connected)
+    |> dispatch_file_systems(connected)
+    |> dispatch_deployment_groups(connected)
+    |> dispatch_app_deployments(connected)
+    |> dispatch_agents(connected)
+    |> dispatch_app_folders(connected)
+    |> dispatch_notifications(connected)
+    |> dispatch_connection()
   end
 
   defp dispatch_secrets(state, %{secrets: secrets}) do
@@ -796,6 +1133,32 @@ defmodule Livebook.Hubs.TeamClient do
     dispatch_events(state, agent_joined: joined, agent_left: left)
   end
 
+  defp dispatch_app_folders(state, %{app_folders: app_folders}) do
+    app_folders = Enum.map(app_folders, &build_app_folder(state, &1))
+
+    {created, deleted, updated} =
+      diff(state.app_folders, app_folders, &(&1.id == &2.id))
+
+    dispatch_events(state,
+      app_folder_deleted: deleted,
+      app_folder_created: created,
+      app_folder_updated: updated
+    )
+  end
+
+  defp dispatch_notifications(state, %{notifications: notifications}) do
+    notifications = Enum.map(notifications, &build_notification/1)
+
+    {created, deleted, updated} =
+      diff(state.notifications, notifications, &(&1.id == &2.id))
+
+    dispatch_events(state,
+      notification_deleted: deleted,
+      notification_sent: created,
+      notification_updated: updated
+    )
+  end
+
   defp dispatch_connection(%{hub: %{id: id}} = state) do
     Teams.Broadcasts.client_connected(id)
     state
@@ -837,6 +1200,14 @@ defmodule Livebook.Hubs.TeamClient do
     put_in(state.hub, hub)
   end
 
+  # TODO: Remove when Billing is public
+  defp put_billing_status(hub, nil = _status) do
+    put_in(
+      hub.billing_status,
+      %{disabled: false, type: nil}
+    )
+  end
+
   defp put_billing_status(hub, %LivebookProto.BillingStatus{} = status) do
     put_in(
       hub.billing_status,
@@ -844,18 +1215,10 @@ defmodule Livebook.Hubs.TeamClient do
     )
   end
 
-  # TODO: Remove when Billing is public
-  defp put_billing_status(hub, nil) do
-    put_in(
-      hub.billing_status,
-      %{disabled: false, type: nil}
-    )
-  end
-
   defp put_billing_status(
          {:trialing,
           %LivebookProto.BillingStatusTrialing{
-            trial_ends_at: %DateTime{} = trial_ends_at
+            trial_ends_at: trial_ends_at
           }}
        ) do
     %{type: :trialing, trial_ends_at: DateTime.from_unix!(trial_ends_at)}
@@ -864,7 +1227,7 @@ defmodule Livebook.Hubs.TeamClient do
   defp put_billing_status(
          {:trial_ended,
           %LivebookProto.BillingStatusTrialEnded{
-            trial_ends_at: %DateTime{} = trial_ends_at
+            trial_ends_at: trial_ends_at
           }}
        ) do
     %{type: :trial_ended, trial_ends_at: DateTime.from_unix!(trial_ends_at)}
@@ -873,7 +1236,7 @@ defmodule Livebook.Hubs.TeamClient do
   defp put_billing_status(
          {:canceling,
           %LivebookProto.BillingStatusCanceling{
-            cancel_at: %DateTime{} = cancel_at
+            cancel_at: cancel_at
           }}
        ) do
     %{type: :canceling, cancel_at: DateTime.from_unix!(cancel_at)}
@@ -921,6 +1284,16 @@ defmodule Livebook.Hubs.TeamClient do
   defp fetch_app_deployment(id, state),
     do: fetch_entry(state.app_deployments, &(&1.id == id), state)
 
+  defp fetch_app_deployment_from_slug(slug, deployment_group_id, state) do
+    fetch_entry(
+      state.app_deployments,
+      &(&1.slug == slug && &1.deployment_group_id == deployment_group_id),
+      state
+    )
+  end
+
+  defp fetch_app_folder(id, state), do: fetch_entry(state.app_folders, &(&1.id == id), state)
+
   defp fetch_entry(entries, fun, state) do
     if entry = Enum.find(entries, fun) do
       {:ok, entry}
@@ -938,10 +1311,25 @@ defmodule Livebook.Hubs.TeamClient do
   defp nullify(""), do: nil
   defp nullify(value), do: value
 
-  defp manager_sync() do
-    # Each node runs the teams client, but we only need to call sync once
-    if Apps.Manager.local?() do
-      Apps.Manager.sync_permanent_apps()
+  defp manager_sync(app_deployment, state) do
+    # We only need to sync if the app deployment belongs to the current
+    # deployment group
+    if app_deployment.deployment_group_id == state.deployment_group_id do
+      # Each node runs the teams client, but we only need to call sync once
+      if Apps.Manager.local?() do
+        Apps.Manager.sync_permanent_apps()
+      end
     end
+  end
+
+  defp authorized_group?(authorization_groups, groups) do
+    Enum.any?(authorization_groups, fn %{provider_id: id, group_name: name} ->
+      %{"provider_id" => id, "group_name" => name} in groups
+    end)
+  end
+
+  defp app_version do
+    Livebook.Config.app_version()
+    |> String.replace_suffix("-dev", "")
   end
 end

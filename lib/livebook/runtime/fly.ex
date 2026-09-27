@@ -51,6 +51,7 @@ defmodule Livebook.Runtime.Fly do
 
   use GenServer, restart: :temporary
 
+  alias Livebook.Config
   alias Livebook.Runtime.RemoteUtils
 
   @type t :: %__MODULE__{
@@ -200,7 +201,10 @@ defmodule Livebook.Runtime.Fly do
 
   defp create_machine(config, runtime_data) do
     base_image = Enum.find(Livebook.Config.docker_images(), &(&1.tag == config.docker_tag))
-    image = "ghcr.io/livebook-dev/livebook:#{base_image.tag}"
+
+    image_registry_url = Config.image_registry_url()
+
+    image = "#{image_registry_url}:#{base_image.tag}"
 
     env =
       Map.merge(
@@ -287,12 +291,10 @@ defmodule Livebook.Runtime.Fly do
         app_name,
         "--bind-addr",
         bind_addr,
-        "--access-token",
-        token,
         "--watch-stdin"
       ]
 
-      env = [{~c"FLY_NO_UPDATE_CHECK", ~c"1"}]
+      env = [{~c"FLY_NO_UPDATE_CHECK", ~c"1"}, {~c"FLY_ACCESS_TOKEN", ~c"#{token}"}]
 
       port =
         Port.open(
@@ -387,7 +389,7 @@ defimpl Livebook.Runtime, for: Livebook.Runtime.Fly do
     Livebook.Runtime.Fly.__connect__(runtime)
   end
 
-  def take_ownership(runtime, opts \\ []) do
+  def take_ownership(runtime, opts) do
     RuntimeServer.attach(runtime.server_pid, self(), opts)
     Process.monitor(runtime.server_pid)
   end
@@ -403,7 +405,7 @@ defimpl Livebook.Runtime, for: Livebook.Runtime.Fly do
     }
   end
 
-  def evaluate_code(runtime, language, code, locator, parent_locators, opts \\ []) do
+  def evaluate_code(runtime, language, code, locator, parent_locators, opts) do
     RuntimeServer.evaluate_code(
       runtime.server_pid,
       language,
@@ -422,8 +424,15 @@ defimpl Livebook.Runtime, for: Livebook.Runtime.Fly do
     RuntimeServer.drop_container(runtime.server_pid, container_ref)
   end
 
-  def handle_intellisense(runtime, send_to, request, parent_locators, node) do
-    RuntimeServer.handle_intellisense(runtime.server_pid, send_to, request, parent_locators, node)
+  def handle_intellisense(runtime, send_to, language, request, parent_locators, node) do
+    RuntimeServer.handle_intellisense(
+      runtime.server_pid,
+      send_to,
+      language,
+      request,
+      parent_locators,
+      node
+    )
   end
 
   def read_file(runtime, path) do
@@ -454,22 +463,14 @@ defimpl Livebook.Runtime, for: Livebook.Runtime.Fly do
     RuntimeServer.stop_smart_cell(runtime.server_pid, ref)
   end
 
-  def fixed_dependencies?(_runtime), do: false
-
-  def add_dependencies(_runtime, code, dependencies) do
-    Livebook.Runtime.Dependencies.add_dependencies(code, dependencies)
-  end
+  def supports_dependencies?(_runtime), do: true
 
   def has_dependencies?(runtime, dependencies) do
     RuntimeServer.has_dependencies?(runtime.server_pid, dependencies)
   end
 
-  def snippet_definitions(_runtime) do
-    Livebook.Runtime.Definitions.snippet_definitions()
-  end
-
-  def search_packages(_runtime, send_to, search) do
-    Livebook.Runtime.Dependencies.search_packages_on_hex(send_to, search)
+  def packages_source(_runtime) do
+    :hex
   end
 
   def put_system_envs(runtime, envs) do

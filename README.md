@@ -46,11 +46,19 @@ pick the one that best fits your use case.
 
   * [Download the installer for Mac and Windows from our homepage](https://livebook.dev/#install)
 
-  * Latest stable builds: [Mac (Universal)](https://github.com/livebook-dev/livebook/releases/latest/download/LivebookInstall-macos-universal.dmg),
-    [Windows](https://github.com/livebook-dev/livebook/releases/latest/download/LivebookInstall-windows-x86_64.exe)
+  * Latest stable builds:
+    [macOS (arm64)](https://github.com/livebook-dev/livebook/releases/latest/download/Livebook-darwin-aarch64.dmg),
+    [macOS (x64)](https://github.com/livebook-dev/livebook/releases/latest/download/Livebook-darwin-x64.dmg),
+    [Windows](https://github.com/livebook-dev/livebook/releases/latest/download/Livebook-windows-x64.exe),
+    [Linux (arm64)](https://github.com/livebook-dev/livebook/releases/latest/download/Livebook-linux-aarch64.AppImage),
+    [Linux (x64)](https://github.com/livebook-dev/livebook/releases/latest/download/Livebook-linux-amd64.AppImage)
 
-  * Nightly builds: [Mac (Universal)](https://github.com/livebook-dev/livebook/releases/download/nightly/LivebookInstall-macos-universal.dmg),
-    [Windows](https://github.com/livebook-dev/livebook/releases/download/nightly/LivebookInstall-windows-x86_64.exe)
+  * Nightly builds:
+    [macOS (arm64)](https://github.com/livebook-dev/livebook/releases/download/nightly/Livebook-darwin-aarch64.dmg),
+    [macOS (x64)](https://github.com/livebook-dev/livebook/releases/download/nightly/Livebook-darwin-x64.dmg),
+    [Windows](https://github.com/livebook-dev/livebook/releases/download/nightly/Livebook-windows-x64.exe),
+    [Linux (arm64)](https://github.com/livebook-dev/livebook/releases/download/nightly/Livebook-linux-aarch64.AppImage),
+    [Linux (x64)](https://github.com/livebook-dev/livebook/releases/download/nightly/Livebook-linux-amd64.AppImage)
 
   * Builds for particular Livebook version are available on our
     [GitHub releases](https://github.com/livebook-dev/livebook/releases).
@@ -145,7 +153,7 @@ You can run latest Livebook directly from source.
 ```shell
 git clone https://github.com/livebook-dev/livebook.git
 cd livebook
-mix deps.get --only prod
+mix setup.prod
 
 # Run the Livebook server
 MIX_ENV=prod mix phx.server
@@ -177,6 +185,8 @@ The following environment variables can be used to configure Livebook on boot:
   * `LIVEBOOK_APP_SERVICE_URL` - sets the application url to manage this
     Livebook instance within the cloud provider platform.
 
+  * `LIVEBOOK_APPS_BANNER` - sets the value to render at the top apps banner.
+
   * `LIVEBOOK_APPS_PATH` - the directory with app notebooks. When set, the apps
     are deployed on Livebook startup with the persisted settings. Password-protected
     notebooks will receive a random password, unless `LIVEBOOK_APPS_PATH_PASSWORD`
@@ -202,7 +212,7 @@ The following environment variables can be used to configure Livebook on boot:
   * `LIVEBOOK_PUBLIC_BASE_URL_PATH` - sets the base url path the `/public/*` routes
     are served on. Note that this takes precedence over `LIVEBOOK_BASE_URL_PATH`,
     if both are set. Setting this may be useful to create exceptions when deploying
-    behind a reverse proxy that requires au1thentication.
+    behind a reverse proxy that requires authentication.
 
   * `LIVEBOOK_CACERTFILE` - path to a local file containing CA certificates.
     Those certificates are used during for server authentication when Livebook
@@ -225,9 +235,6 @@ The following environment variables can be used to configure Livebook on boot:
     "standalone" (Standalone), "attached:NODE:COOKIE" (Attached node)
     or "embedded" (Embedded). Defaults to "standalone".
 
-  * `LIVEBOOK_FIPS` - if set to "true", it enables the FIPS mode on startup.
-    See more details in [the documentation](https://hexdocs.pm/livebook/fips.html).
-
   * `LIVEBOOK_FORCE_SSL_HOST` - sets a host to redirect to if the request is not over HTTPS.
     Note it does not apply when accessing Livebook via localhost. Defaults to nil.
 
@@ -237,7 +244,7 @@ The following environment variables can be used to configure Livebook on boot:
 
   * `LIVEBOOK_IDENTITY_PROVIDER` - controls whether Zero Trust Authentication
     must be used for this Livebook instance. This is useful when deploying
-    Livebook airgapped inside a cloud platform, such as Cloudflare and Google.
+    Livebook inside a cloud platform, such as Cloudflare and Google.
     Supported values are:
 
       * `basic_auth:<username>:<password>`
@@ -255,6 +262,9 @@ The following environment variables can be used to configure Livebook on boot:
     By default iframes are loaded from local `LIVEBOOK_IFRAME_PORT` when accessing
     Livebook over http:// and from https://livebookusercontent.com when accessing over https://.
 
+  * `LIVEBOOK_IMAGE_REGISTRY_URL` - sets the container image registry used to fetch livebook images from.
+    By default uses `ghcr.io/livebook-dev/livebook`.
+
   * `LIVEBOOK_IP` - sets the ip address to start the web application on.
     Must be a valid IPv4 or IPv6 address.
 
@@ -262,9 +272,16 @@ The following environment variables can be used to configure Livebook on boot:
     logging, either of: error, warning, notice, info, debug. Defaults to warning.
 
   * `LIVEBOOK_LOG_METADATA` - a comma-separated list of metadata keys that should
-    be included in the log messages. Currently the only Livebook-spcecific key is
-    users (attached to evaluation and request logs). By default includes only
-    request_id.
+    be included in the log messages. Livebook-specific keys include:
+    - `users` (attached to evaluation and request logs)
+    - `session_mode` (attached to evaluation logs, either "default" or "app")
+    - `code` (attached to evaluation logs, the code being evaluated)
+    - `event` (attached to evaluation logs, currently always "code.evaluate")
+
+    By default includes only `request_id`.
+
+  * `LIVEBOOK_LOG_FORMAT` - sets the log output format, either "text" (default)
+    for human-readable logs or "json" for structured JSON.
 
   * `LIVEBOOK_NODE` - sets the node name for running Livebook in a cluster.
     Note that Livebook always runs using long names distribution, so the
@@ -342,30 +359,10 @@ mix phx.server
 mix test
 ```
 
-### Acknowledgements
-
-Thank you to [Uffizzi](https://www.uffizzi.com) for providing ephemeral environments to preview pull requests.
-
-### Desktop app builds
-
-For macOS, run:
+### Desktop app
 
 ```shell
-# Test macOS app locally
-(cd rel/app/macos && ./run.sh)
-
-# Build macOS installer
-.github/scripts/app/build_macos.sh
-```
-
-For Windows, run:
-
-```shell
-# Test Windows app locally
-(cd rel/app/windows && ./run.sh)
-
-# Build Windows installer
-.github/scripts/app/build_windows.sh
+./rel/app/tauri.sh dev
 ```
 
 ## Platinum sponsors
@@ -382,12 +379,13 @@ Fly is a platform for running full stack apps and databases close to your users.
 
 ## Sponsors
 
-<a href="https://huggingface.co/">
-  <img height="70" src="https://huggingface.co/datasets/huggingface/brand-assets/resolve/main/hf-logo-with-title.png" alt="Hugging Face">
-</a>
+[<img src="https://nlnet.nl/logo/banner.png" alt="NLnet foundation logo" width="20%" />](https://nlnet.nl)
+[<img src="https://nlnet.nl/image/logos/NGI0_tag.svg" alt="NGI Zero Logo" width="20%" />](https://nlnet.nl/commonsfund)
 
-The platform where the machine learning community<br />
-collaborates on models, datasets, and applications.
+This project was a recipient of [NGI0 Commons Fund](https://nlnet.nl/commonsfund),<br />
+a fund established by [NLnet](https://nlnet.nl) with financial support from the<br />
+European Commission's [Next Generation Internet](https://ngi.eu) program.<br />
+[Learn more](https://nlnet.nl/project/Livebook-Python).
 
 <br />
 

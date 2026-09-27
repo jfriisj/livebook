@@ -33,7 +33,8 @@ defmodule Livebook.LiveMarkdown.ExportTest do
                     continue_on_error: true,
                     source: """
                     Enum.to_list(1..10)\
-                    """
+                    """,
+                    output_size: :wide
                 },
                 %{
                   Notebook.Cell.new(:markdown)
@@ -73,6 +74,7 @@ defmodule Livebook.LiveMarkdown.ExportTest do
                     IO.puts("My text")\
                     """,
                     attrs: %{"text" => "My text"},
+                    output_size: :full,
                     kind: "text"
                 },
                 %{
@@ -90,6 +92,13 @@ defmodule Livebook.LiveMarkdown.ExportTest do
                   | language: :erlang,
                     source: """
                     lists:seq(1, 10).\
+                    """
+                },
+                %{
+                  Notebook.Cell.new(:code)
+                  | language: :python,
+                    source: """
+                    range(0, 10)\
                     """
                 }
               ]
@@ -110,7 +119,7 @@ defmodule Livebook.LiveMarkdown.ExportTest do
 
     $x_{i} + y_{i}$
 
-    <!-- livebook:{"continue_on_error":true,"reevaluate_automatically":true} -->
+    <!-- livebook:{"continue_on_error":true,"output_size":"wide","reevaluate_automatically":true} -->
 
     ```elixir
     Enum.to_list(1..10)
@@ -132,7 +141,7 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     Process.info()
     ```
 
-    <!-- livebook:{"attrs":"eyJ0ZXh0IjoiTXkgdGV4dCJ9","chunks":null,"kind":"text","livebook_object":"smart_cell"} -->
+    <!-- livebook:{"attrs":"eyJ0ZXh0IjoiTXkgdGV4dCJ9","chunks":null,"kind":"text","livebook_object":"smart_cell","output_size":"full"} -->
 
     ```elixir
     IO.puts("My text")
@@ -148,6 +157,10 @@ defmodule Livebook.LiveMarkdown.ExportTest do
 
     ```erlang
     lists:seq(1, 10).
+    ```
+
+    ```python
+    range(0, 10)
     ```
     """
 
@@ -936,6 +949,57 @@ defmodule Livebook.LiveMarkdown.ExportTest do
     assert expected_document == document
   end
 
+  test "includes error outputs" do
+    notebook = %{
+      Notebook.new()
+      | name: "My Notebook",
+        sections: [
+          %{
+            Notebook.Section.new()
+            | name: "Section 1",
+              cells: [
+                %{
+                  Notebook.Cell.new(:code)
+                  | source: """
+                    raise "hello"\
+                    """,
+                    outputs: [
+                      {0,
+                       %{
+                         type: :error,
+                         message:
+                           "\e[31m** (RuntimeError) hello\e[0m\n\e[31m    #cell:tlbdimkdsfldvwge:1: (file)\n\e[0m",
+                         context: nil
+                       }}
+                    ]
+                }
+              ]
+          }
+        ]
+    }
+
+    expected_document = """
+    # My Notebook
+
+    ## Section 1
+
+    ```elixir
+    raise "hello"
+    ```
+
+    <!-- livebook:{"output":true} -->
+
+    ```
+    ** (RuntimeError) hello
+        #cell:tlbdimkdsfldvwge:1: (file)
+    ```
+    """
+
+    {document, []} = Export.notebook_to_livemd(notebook, include_outputs: true)
+
+    assert expected_document == document
+  end
+
   test "includes outputs when notebook has :persist_outputs set" do
     notebook = %{
       Notebook.new()
@@ -1090,12 +1154,13 @@ defmodule Livebook.LiveMarkdown.ExportTest do
               auto_shutdown_ms: 5_000,
               access_type: :public,
               show_source: true,
-              output_type: :rich
+              output_type: :rich,
+              app_folder_id: "123"
           }
       }
 
       expected_document = """
-      <!-- livebook:{"app_settings":{"access_type":"public","auto_shutdown_ms":5000,"multi_session":true,"output_type":"rich","show_existing_sessions":true,"show_source":true,"slug":"app"}} -->
+      <!-- livebook:{"app_settings":{"access_type":"public","app_folder_id":"123","auto_shutdown_ms":5000,"multi_session":true,"output_type":"rich","show_existing_sessions":true,"show_source":true,"slug":"app"}} -->
 
       # My Notebook
       """
@@ -1131,13 +1196,67 @@ defmodule Livebook.LiveMarkdown.ExportTest do
           | name: "My Notebook",
             sections: [%{Notebook.Section.new() | name: "Section 1"}]
         }
-        |> Notebook.put_setup_cell(%{Notebook.Cell.new(:code) | source: "Mix.install([...])"})
+        |> Notebook.put_setup_cells([%{Notebook.Cell.new(:code) | source: "Mix.install([...])"}])
 
       expected_document = """
       # My Notebook
 
       ```elixir
       Mix.install([...])
+      ```
+
+      ## Section 1
+      """
+
+      {document, []} = Export.notebook_to_livemd(notebook)
+
+      assert expected_document == document
+    end
+
+    test "includes pyproject setup cell when present" do
+      notebook =
+        %{
+          Notebook.new()
+          | name: "My Notebook",
+            sections: [%{Notebook.Section.new() | name: "Section 1"}]
+        }
+        |> Notebook.put_setup_cells([
+          %{
+            Notebook.Cell.new(:code)
+            | source: """
+              Mix.install([
+                {:pythonx, "~> 0.4.2"}
+              ])\
+              """
+          },
+          %{
+            Notebook.Cell.new(:code)
+            | language: :"pyproject.toml",
+              source: """
+              [project]
+              name = "project"
+              version = "0.0.0"
+              requires-python = "==3.13.*"
+              dependencies = []\
+              """
+          }
+        ])
+
+      expected_document = """
+      # My Notebook
+
+      ```elixir
+      Mix.install([
+        {:pythonx, "~> 0.4.2"}
+      ])
+      ```
+
+      ```pyproject.toml
+      [project]
+      name = "project"
+      version = "0.0.0"
+      requires-python = "==3.13.*"
+      dependencies = []
       ```
 
       ## Section 1

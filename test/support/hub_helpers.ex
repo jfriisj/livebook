@@ -22,90 +22,6 @@ defmodule Livebook.HubHelpers do
     }
   }
 
-  def create_team_hub(user, node) do
-    hub = build_team_hub(user, node)
-    Livebook.Hubs.save_hub(hub)
-  end
-
-  def create_agent_team_hub(node, opts \\ []) do
-    {agent_key, org, deployment_group, hub} = build_agent_team_hub(node, opts)
-    erpc_call(node, :create_org_key_pair, [[org: org]])
-    ^hub = Livebook.Hubs.save_hub(hub)
-
-    {agent_key, org, deployment_group, hub}
-  end
-
-  def build_team_headers(user, node) do
-    hub = build_team_hub(user, node)
-
-    headers = [
-      {"x-user", to_string(hub.user_id)},
-      {"x-org", to_string(hub.org_id)},
-      {"x-org-key", to_string(hub.org_key_id)},
-      {"x-session-token", hub.session_token}
-    ]
-
-    {hub, headers}
-  end
-
-  def build_team_hub(user, node) do
-    teams_org = build(:org)
-    teams_key = teams_org.teams_key
-    key_hash = Livebook.Teams.Org.key_hash(teams_org)
-
-    org = erpc_call(node, :create_org, [])
-    org_key = erpc_call(node, :create_org_key, [[org: org, key_hash: key_hash]])
-    org_key_pair = erpc_call(node, :create_org_key_pair, [[org: org]])
-    token = erpc_call(node, :associate_user_with_org, [user, org])
-
-    build(:team,
-      id: "team-#{org.name}",
-      hub_name: org.name,
-      user_id: user.id,
-      org_id: org.id,
-      org_key_id: org_key.id,
-      org_public_key: org_key_pair.public_key,
-      session_token: token,
-      teams_key: teams_key
-    )
-  end
-
-  def build_agent_team_hub(node, opts \\ []) do
-    teams_org = build(:org)
-    teams_key = teams_org.teams_key
-    key_hash = Livebook.Teams.Org.key_hash(teams_org)
-
-    org = erpc_call(node, :create_org, [])
-    org_key = erpc_call(node, :create_org_key, [[org: org, key_hash: key_hash]])
-
-    deployment_group_attrs =
-      opts
-      |> Keyword.get(:deployment_group, [])
-      |> Keyword.merge(
-        name: "sleepy-cat-#{Ecto.UUID.generate()}",
-        mode: :online,
-        org: org
-      )
-
-    deployment_group = erpc_call(node, :create_deployment_group, [deployment_group_attrs])
-
-    agent_key = erpc_call(node, :create_agent_key, [[deployment_group: deployment_group]])
-
-    team =
-      build(:team,
-        id: "team-#{org.name}",
-        hub_name: org.name,
-        user_id: nil,
-        org_id: org.id,
-        org_key_id: org_key.id,
-        org_public_key: nil,
-        session_token: agent_key.key,
-        teams_key: teams_key
-      )
-
-    {agent_key, org, deployment_group, team}
-  end
-
   def build_offline_team_hub(user, node) do
     teams_org = build(:org, teams_key: @offline_hub_key, name: @offline_hub_org_name)
     key_hash = Livebook.Teams.Org.key_hash(teams_org)
@@ -203,18 +119,14 @@ defmodule Livebook.HubHelpers do
   def put_offline_hub_file_system(file_system) do
     hub = offline_hub()
     {:ok, pid} = hub_pid(hub)
-    secret_key = Livebook.Teams.derive_key(hub.teams_key)
     %{name: name} = Livebook.FileSystem.external_metadata(file_system)
-    attrs = Livebook.FileSystem.dump(file_system)
-    json = JSON.encode!(attrs)
-    value = Livebook.Teams.encrypt(json, secret_key)
 
     file_system_created =
       %LivebookProto.FileSystemCreated{
         id: file_system.external_id,
         name: name,
         type: Livebook.FileSystems.type(file_system),
-        value: value
+        value: generate_file_system_json(hub, file_system)
       }
 
     send(pid, {:event, :file_system_created, file_system_created})
@@ -228,17 +140,12 @@ defmodule Livebook.HubHelpers do
     send(pid, {:event, :file_system_deleted, file_system_deleted})
   end
 
-  def create_teams_file_system(hub, node, org_key \\ nil) do
-    org_key = if org_key, do: org_key, else: erpc_call(node, :get_org_key!, [hub.org_key_id])
-    erpc_call(node, :create_file_system, [[org_key: org_key]])
-  end
-
   def build_bypass_file_system(bypass, hub_id \\ Livebook.Hubs.Personal.id()) do
     bucket_url = "http://localhost:#{bypass.port}/mybucket"
 
     file_system =
       build(:fs_s3,
-        id: Livebook.FileSystem.S3.id(hub_id, bucket_url),
+        id: Livebook.FileSystemHelpers.s3_id(hub_id, bucket_url),
         bucket_url: bucket_url,
         region: "auto",
         hub_id: hub_id
@@ -283,22 +190,12 @@ defmodule Livebook.HubHelpers do
     assert_receive {:agent_joined, ^agent}
   end
 
-  @doc """
-  Creates a new Team hub from given user and node, and await the WebSocket to be connected.
+  def generate_file_system_json(team, file_system) do
+    secret_key = Livebook.Teams.derive_key(team.teams_key)
+    attrs = Livebook.FileSystem.dump(file_system)
+    json = JSON.encode!(attrs)
 
-      test "my test", %{user: user, node: node} do
-        team = connect_to_teams(user, node)
-        assert "team-" <> _ = team.id
-      end
-
-  """
-  @spec connect_to_teams(struct(), node()) :: Livebook.Hubs.Team.t()
-  def connect_to_teams(user, node) do
-    %{id: id} = team = create_team_hub(user, node)
-    assert_receive {:hub_connected, ^id}, 3_000
-    assert_receive {:client_connected, ^id}, 3_000
-
-    team
+    Livebook.Teams.encrypt(json, secret_key)
   end
 
   defp hub_pid(hub) do

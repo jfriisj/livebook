@@ -1,6 +1,5 @@
 defmodule LivebookWeb.SidebarHook do
   use LivebookWeb, :verified_routes
-  require Logger
 
   import Phoenix.Component
   import Phoenix.LiveView
@@ -9,12 +8,17 @@ defmodule LivebookWeb.SidebarHook do
   def on_mount(:default, _params, _session, socket) do
     if connected?(socket) do
       Livebook.Hubs.Broadcasts.subscribe([:crud, :connection])
+      Livebook.Teams.Broadcasts.subscribe(:clients)
+      LivebookWeb.SessionHelpers.subscribe_to_logout()
       Phoenix.PubSub.subscribe(Livebook.PubSub, "sidebar")
     end
 
+    hubs = Livebook.Hubs.get_metadata()
+    notifications = Livebook.Teams.get_notifications()
+
     socket =
       socket
-      |> assign(saved_hubs: Livebook.Hubs.get_metadata())
+      |> assign(saved_hubs: hubs, notifications: notifications)
       |> attach_hook(:hubs, :handle_info, &handle_info/2)
       |> attach_hook(:shutdown, :handle_info, &handle_info/2)
       |> attach_hook(:shutdown, :handle_event, &handle_event/3)
@@ -29,12 +33,7 @@ defmodule LivebookWeb.SidebarHook do
   end
 
   defp handle_info(:logout, socket) do
-    {_type, module, _key} = Livebook.Config.identity_provider()
-
-    case module.logout(LivebookWeb.ZTA, socket) do
-      :ok -> {:halt, redirect(socket, to: ~p"/logout")}
-      {:error, reason} -> {:cont, put_flash(socket, :error, reason)}
-    end
+    {:halt, redirect(socket, to: ~p"/logout")}
   end
 
   @connection_events ~w(hub_connected hub_changed hub_deleted)a
@@ -52,6 +51,10 @@ defmodule LivebookWeb.SidebarHook do
      socket
      |> assign(saved_hubs: Livebook.Hubs.get_metadata())
      |> put_flash(:error, error)}
+  end
+
+  defp handle_info({:notification_sent, _notification}, socket) do
+    {:cont, assign(socket, notifications: Livebook.Teams.get_notifications())}
   end
 
   defp handle_info(_event, socket), do: {:cont, socket}
@@ -72,18 +75,7 @@ defmodule LivebookWeb.SidebarHook do
   end
 
   defp handle_event("logout", _params, socket) do
-    on_confirm = fn socket ->
-      Phoenix.PubSub.broadcast(Livebook.PubSub, "sidebar", :logout)
-      put_flash(socket, :info, "Livebook is logging out. You will be redirected soon.")
-    end
-
-    {:halt,
-     confirm(socket, on_confirm,
-       title: "Log out",
-       description: "Are you sure you want to log out Livebook now?",
-       confirm_text: "Log out",
-       confirm_icon: "logout-box-line"
-     )}
+    {:halt, LivebookWeb.SessionHelpers.confirm_logout(socket)}
   end
 
   defp handle_event(_event, _params, socket), do: {:cont, socket}

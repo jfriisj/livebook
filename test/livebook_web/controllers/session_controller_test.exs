@@ -3,7 +3,10 @@ defmodule LivebookWeb.SessionControllerTest do
 
   require Phoenix.LiveViewTest
 
-  alias Livebook.{Sessions, Session, Notebook, FileSystem}
+  alias Livebook.Sessions
+  alias Livebook.Session
+  alias Livebook.Notebook
+  alias Livebook.FileSystem
 
   describe "show_file" do
     test "returns not found when the given session does not exist", %{conn: conn} do
@@ -442,7 +445,7 @@ defmodule LivebookWeb.SessionControllerTest do
     # We need runtime in place to actually copy the archive
     Session.subscribe(session.id)
     Session.connect_runtime(session.pid)
-    assert_receive {:operation, {:runtime_connected, _, _}}
+    assert_receive {:operations, [{:runtime_connected, _, _}]}
 
     conn = get(conn, ~p"/public/sessions/#{session.id}/assets/#{hash}/main.js")
 

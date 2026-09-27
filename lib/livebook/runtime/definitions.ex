@@ -1,5 +1,5 @@
 defmodule Livebook.Runtime.Definitions do
-  @kino_requirement "~> 0.14.0"
+  @kino_requirement "~> 0.19.0"
 
   def kino_requirement do
     @kino_requirement
@@ -17,7 +17,7 @@ defmodule Livebook.Runtime.Definitions do
 
   kino_db = %{
     name: "kino_db",
-    dependency: %{dep: {:kino_db, "~> 0.3.0"}, config: []}
+    dependency: %{dep: {:kino_db, "~> 0.5.0"}, config: []}
   }
 
   exqlite = %{
@@ -50,11 +50,6 @@ defmodule Livebook.Runtime.Definitions do
     dependency: %{dep: {:torchx, ">= 0.0.0"}, config: [nx: [default_backend: Torchx.Backend]]}
   }
 
-  kino_explorer = %{
-    name: "kino_explorer",
-    dependency: %{dep: {:kino_explorer, "~> 0.1.20"}, config: []}
-  }
-
   kino_flame = %{
     name: "kino_flame",
     dependency: %{dep: {:kino_flame, "~> 0.1.5"}, config: []}
@@ -63,11 +58,6 @@ defmodule Livebook.Runtime.Definitions do
   flame_k8s_backend = %{
     name: "flame_k8s_backend",
     dependency: %{dep: {:flame_k8s_backend, "~> 0.5"}, config: []}
-  }
-
-  explorer = %{
-    name: "explorer",
-    dependency: %{dep: {:explorer, "~> 0.10.0"}, config: []}
   }
 
   stb_image = %{
@@ -85,6 +75,11 @@ defmodule Livebook.Runtime.Definitions do
     dependency: %{dep: {:yaml_elixir, "~> 2.0"}, config: []}
   }
 
+  adbc = %{
+    name: "adbc",
+    dependency: %{dep: {:adbc, "~> 0.12"}, config: []}
+  }
+
   windows? = match?({:win32, _}, :os.type())
   nx_backend_package = if(windows?, do: torchx, else: exla)
 
@@ -94,17 +89,6 @@ defmodule Livebook.Runtime.Definitions do
       name: "Database connection",
       requirement_presets: [
         %{
-          name: "Amazon Athena",
-          packages: [
-            kino_db,
-            %{
-              name: "req_athena",
-              dependency: %{dep: {:req_athena, ">= 0.0.0"}, config: []}
-            },
-            explorer
-          ]
-        },
-        %{
           name: "Clickhouse",
           packages: [
             kino_db,
@@ -112,14 +96,13 @@ defmodule Livebook.Runtime.Definitions do
               name: "req_ch",
               dependency: %{dep: {:req_ch, ">= 0.0.0"}, config: []}
             },
-            explorer
+            adbc
           ]
         },
         %{
           name: "DuckDB",
           packages: [
             kino_db,
-            kino_explorer,
             %{
               name: "adbc",
               dependency: %{dep: {:adbc, ">= 0.0.0"}, config: [adbc: [drivers: [:duckdb]]]}
@@ -130,7 +113,6 @@ defmodule Livebook.Runtime.Definitions do
           name: "Google BigQuery",
           packages: [
             kino_db,
-            kino_explorer,
             %{
               name: "adbc",
               dependency: %{dep: {:adbc, ">= 0.0.0"}, config: [adbc: [drivers: [:bigquery]]]}
@@ -155,7 +137,6 @@ defmodule Livebook.Runtime.Definitions do
           name: "Snowflake",
           packages: [
             kino_db,
-            kino_explorer,
             %{
               name: "adbc",
               dependency: %{dep: {:adbc, ">= 0.0.0"}, config: [adbc: [drivers: [:snowflake]]]}
@@ -226,16 +207,6 @@ defmodule Livebook.Runtime.Definitions do
       ]
     },
     %{
-      kind: "Elixir.KinoExplorer.DataTransformCell",
-      name: "Data transform",
-      requirement_presets: [
-        %{
-          name: "Default",
-          packages: [kino_explorer]
-        }
-      ]
-    },
-    %{
       kind: "Elixir.Kino.RemoteExecutionCell",
       name: "Remote execution",
       requirement_presets: [
@@ -261,10 +232,8 @@ defmodule Livebook.Runtime.Definitions do
     }
   ]
 
-  @snippet_definitions [
-    # Examples
+  @example_snippet_definitions [
     %{
-      type: :example,
       name: "Form",
       icon: "bill-line",
       variants: [
@@ -288,8 +257,10 @@ defmodule Livebook.Runtime.Definitions do
           packages: [kino]
         }
       ]
-    },
-    # File actions
+    }
+  ]
+
+  @file_action_snippet_definitions [
     %{
       type: :file_action,
       file_types: :any,
@@ -318,24 +289,28 @@ defmodule Livebook.Runtime.Definitions do
     %{
       type: :file_action,
       file_types: ["text/csv"],
-      description: "Create a dataframe",
+      description: "Load into DuckDB",
       source: """
-      df =
-        Kino.FS.file_path("{{NAME}}")
-        |> Explorer.DataFrame.from_csv!()\
+      Adbc.download_driver!(:duckdb)
+      db = Kino.start_child!({Adbc.Database, driver: :duckdb})
+      conn = Kino.start_child!({Adbc.Connection, database: db})
+      path = Kino.FS.file_path("{{NAME}}")
+      Adbc.Connection.query!(conn, "SELECT * FROM read_csv($1)", [path])
       """,
-      packages: [kino, kino_explorer]
+      packages: [kino, kino_db, adbc]
     },
     %{
       type: :file_action,
       file_types: [".parquet"],
-      description: "Create a dataframe",
+      description: "Load into DuckDB",
       source: """
-      df =
-        Kino.FS.file_spec("{{NAME}}")
-        |> Explorer.DataFrame.from_parquet!(lazy: true)\
+      Adbc.download_driver!(:duckdb)
+      db = Kino.start_child!({Adbc.Database, driver: :duckdb})
+      conn = Kino.start_child!({Adbc.Connection, database: db})
+      path = Kino.FS.file_path("{{NAME}}")
+      Adbc.Connection.query!(conn, "SELECT * FROM read_parquet($1)", [path])
       """,
-      packages: [kino, kino_explorer]
+      packages: [kino, kino_db, adbc]
     },
     %{
       type: :file_action,
@@ -501,7 +476,55 @@ defmodule Livebook.Runtime.Definitions do
     }
   ]
 
+  @spec smart_cell_definitions() :: list(Livebook.Runtime.smart_cell_definition())
   def smart_cell_definitions(), do: @smart_cell_definitions
 
-  def snippet_definitions(), do: @snippet_definitions
+  @doc """
+  Code snippet with fixed source, serving as an example or boilerplate.
+  """
+  @spec example_snippet_definitions() ::
+          list(%{
+            type: :example,
+            name: String.t(),
+            icon: String.t(),
+            variants:
+              list(%{
+                name: String.t(),
+                source: String.t(),
+                packages: list(Livebook.Runtime.package())
+              })
+          })
+  def example_snippet_definitions(), do: @example_snippet_definitions
+
+  @doc """
+  Code snippet for acting on files of the given type.
+
+  The action is applicable to files matching any of the specified types,
+  where a type can be either:
+
+    * specific MIME type, like `text/csv`
+    * MIME type family, like `image/*`
+    * file extension, like `.csv`
+
+  The source is expected to include `{{NAME}}`, which is replaced with
+  the actual file name.
+  """
+  @spec file_action_snippet_definitions() ::
+          list(%{
+            file_types: :any | list(String.t()),
+            description: String.t(),
+            source: String.t(),
+            packages: list(Livebook.Runtime.package())
+          })
+  def file_action_snippet_definitions(), do: @file_action_snippet_definitions
+
+  def pythonx_dependency() do
+    %{dep: {:pythonx, "~> 0.4.2"}, config: []}
+  end
+
+  def kino_pythonx_dependency() do
+    %{dep: {:kino_pythonx, "~> 0.1.0"}, config: []}
+  end
+
+  def pythonx_requirement(), do: "~> 0.4.0"
 end

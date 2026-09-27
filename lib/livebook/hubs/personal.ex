@@ -140,8 +140,8 @@ defmodule Livebook.Hubs.Personal do
   @spec get_file_systems() :: list(FileSystem.t())
   def get_file_systems() do
     Storage.all(@file_systems_namespace)
-    |> Enum.sort_by(& &1.bucket_url)
     |> Enum.map(&to_file_system/1)
+    |> Enum.sort_by(&FileSystem.external_metadata(&1).name)
   end
 
   @doc """
@@ -281,4 +281,6 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Personal do
   def deployment_groups(_personal), do: nil
 
   def get_app_specs(_personal), do: []
+
+  def get_app_folders(_personal), do: []
 end

@@ -39,17 +39,6 @@ const Cell = {
 
     this.updateInsertModeAvailability();
 
-    // Setup action handlers
-
-    if (["code", "smart"].includes(this.props.type)) {
-      const amplifyButton = this.el.querySelector(
-        `[data-el-amplify-outputs-button]`,
-      );
-      amplifyButton.addEventListener("click", (event) => {
-        this.el.toggleAttribute("data-js-amplified");
-      });
-    }
-
     if (this.props.type === "smart") {
       const toggleSourceButton = this.el.querySelector(
         `[data-el-toggle-source-button]`,

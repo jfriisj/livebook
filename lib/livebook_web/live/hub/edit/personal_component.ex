@@ -3,7 +3,6 @@ defmodule LivebookWeb.Hub.Edit.PersonalComponent do
 
   alias Livebook.Hubs
   alias Livebook.Hubs.Personal
-  alias LivebookWeb.LayoutComponents
   alias LivebookWeb.NotFoundError
 
   @impl true
@@ -43,10 +42,10 @@ defmodule LivebookWeb.Hub.Edit.PersonalComponent do
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="p-4 md:px-12 md:py-7 max-w-screen-md mx-auto">
+    <div class="p-4 md:px-12 md:py-7 max-w-(--breakpoint-md) mx-auto">
       <div id={"#{@id}-component"}>
         <div class="mb-8 flex flex-col space-y-2">
-          <LayoutComponents.title text={"#{@hub.hub_emoji} #{@hub.hub_name}"} />
+          <.title text={"#{@hub.hub_emoji} #{@hub.hub_name}"} />
 
           <p class="text-gray-700 text-sm">
             Your personal workspace. All data is stored on your machine and only you can access it.
@@ -75,7 +74,7 @@ defmodule LivebookWeb.Hub.Edit.PersonalComponent do
                 <.emoji_field field={f[:hub_emoji]} label="Emoji" />
               </div>
 
-              <div class="!mt-6">
+              <div class="mt-6!">
                 <.button type="submit" phx-disable-with="Updating..." disabled={not @changeset.valid?}>
                   Save
                 </.button>

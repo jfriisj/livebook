@@ -17,8 +17,7 @@ config :livebook, LivebookWeb.Endpoint,
   debug_errors: true,
   check_origin: false,
   watchers: [
-    # We invoke node rather than an npm task, so that it works on Windows
-    node: ["build.js", "--watch", cd: Path.expand("../assets", __DIR__)]
+    bun_assets: {Bun, :install_and_run, [:assets, ~w(dev)]}
   ]
 
 config :livebook,
@@ -54,20 +53,28 @@ config :livebook,
 config :livebook, LivebookWeb.Endpoint,
   live_reload: [
     patterns: [
-      ~r"tmp/static_dev/.*(js|css|png|jpeg|jpg|gif|svg)$",
-      ~r"lib/livebook_web/(live|views|components)/.*(ex)$",
-      ~r"lib/livebook_web/templates/.*(eex)$"
+      ~r"priv/static/.*(js|css|png|jpeg|jpg|gif|svg)$",
+      ~r"lib/livebook_web/controllers/.*(ex|heex)$"
+    ],
+    notify: [
+      # For LV we configure re-render without reloading the page.
+      live_view: [
+        ~r"lib/livebook_web/(live|components)/.*(ex|heex)$"
+      ]
     ],
     web_console_logger: true
   ]
 
 # Do not include timestamps in development logs
-config :logger, :console,
+config :logger, :default_formatter,
   format: "$metadata[$level] $message\n",
   metadata: []
 
 # Include HEEx debug annotations as HTML comments in rendered markup
-config :phoenix_live_view, :debug_heex_annotations, true
+config :phoenix_live_view,
+  debug_heex_annotations: true,
+  debug_attributes: true,
+  enable_expensive_runtime_checks: true
 
 # Set a higher stacktrace during development. Avoid configuring such
 # in production as building large stacktraces may be expensive.

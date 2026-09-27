@@ -36,14 +36,20 @@ defmodule Livebook.Session.Data do
     :users_map,
     :secrets,
     :hub_secrets,
+    :hub_file_systems,
+    :hub_app_folders,
     :mode,
     :deployed_app_slug,
     :app_data
   ]
 
-  alias Livebook.{Notebook, Text, Runtime, FileSystem, Hubs}
+  alias Livebook.Notebook
+  alias Livebook.Notebook.Cell
+  alias Livebook.Notebook.Section
+  alias Livebook.Text
+  alias Livebook.FileSystem
+  alias Livebook.Runtime
   alias Livebook.Users.User
-  alias Livebook.Notebook.{Cell, Section, AppSettings}
   alias Livebook.Utils.Graph
   alias Livebook.Secrets.Secret
 
@@ -66,6 +72,7 @@ defmodule Livebook.Session.Data do
           users_map: %{User.id() => User.t()},
           secrets: secrets(),
           hub_secrets: list(Secret.t()),
+          hub_file_systems: list(FileSystem.t()),
           mode: session_mode(),
           deployed_app_slug: String.t() | nil,
           app_data: nil | app_data()
@@ -194,8 +201,10 @@ defmodule Livebook.Session.Data do
           | {:delete_section, client_id(), Section.id(), delete_cells :: boolean()}
           | {:delete_cell, client_id(), Cell.id()}
           | {:restore_cell, client_id(), Cell.id()}
-          | {:move_cell, client_id(), Cell.id(), offset :: integer()}
-          | {:move_section, client_id(), Section.id(), offset :: integer()}
+          | {:move_cell, client_id(), Cell.id(), Section.id(), index()}
+          | {:move_section, client_id(), Section.id(), index()}
+          | {:enable_language, client_id(), atom()}
+          | {:disable_language, client_id(), atom()}
           | {:queue_cells_evaluation, client_id(), list(Cell.id()), evaluation_opts :: keyword()}
           | {:add_cell_doctest_report, client_id(), Cell.id(), Runtime.doctest_report()}
           | {:add_cell_evaluation_output, client_id(), Cell.id(), term()}
@@ -238,11 +247,13 @@ defmodule Livebook.Session.Data do
           | {:unset_secret, client_id(), String.t()}
           | {:set_notebook_hub, client_id(), String.t()}
           | {:sync_hub_secrets, client_id()}
+          | {:sync_hub_file_systems, client_id()}
+          | {:sync_hub_app_folders, client_id()}
           | {:add_file_entries, client_id(), list(Notebook.file_entry())}
           | {:rename_file_entry, client_id(), name :: String.t(), new_name :: String.t()}
           | {:delete_file_entry, client_id(), String.t()}
           | {:allow_file_entry, client_id(), String.t()}
-          | {:set_app_settings, client_id(), AppSettings.t()}
+          | {:set_app_settings, client_id(), Notebook.AppSettings.t()}
           | {:set_deployed_app_slug, client_id(), String.t()}
           | {:app_deactivate, client_id()}
           | {:app_shutdown, client_id()}
@@ -293,8 +304,10 @@ defmodule Livebook.Session.Data do
         %{status: %{execution: :executing, lifecycle: :active}}
       end
 
-    hub = Hubs.fetch_hub!(notebook.hub_id)
-    hub_secrets = Hubs.get_secrets(hub)
+    hub = Livebook.Hubs.fetch_hub!(notebook.hub_id)
+    hub_secrets = Livebook.Hubs.get_secrets(hub)
+    hub_file_systems = Livebook.Hubs.get_file_systems(hub)
+    hub_app_folders = Livebook.Hubs.Provider.get_app_folders(hub)
 
     startup_secrets =
       for secret <- Livebook.Secrets.get_startup_secrets(),
@@ -327,6 +340,8 @@ defmodule Livebook.Session.Data do
       users_map: %{},
       secrets: secrets,
       hub_secrets: hub_secrets,
+      hub_file_systems: hub_file_systems,
+      hub_app_folders: hub_app_folders,
       mode: opts[:mode],
       deployed_app_slug: nil,
       app_data: app_data
@@ -488,7 +503,7 @@ defmodule Livebook.Session.Data do
 
   def apply_operation(data, {:delete_section, _client_id, id, delete_cells}) do
     with {:ok, section} <- Notebook.fetch_section(data.notebook, id),
-         true <- section != hd(data.notebook.sections) or delete_cells,
+         true <- section != hd(data.notebook.sections) or section.cells == [] or delete_cells,
          [] <- Notebook.child_sections(data.notebook, section.id) do
       data
       |> with_actions()
@@ -534,14 +549,13 @@ defmodule Livebook.Session.Data do
     end
   end
 
-  def apply_operation(data, {:move_cell, _client_id, id, offset}) do
+  def apply_operation(data, {:move_cell, _client_id, id, section_id, index}) do
     with {:ok, cell, section} <- Notebook.fetch_cell_and_section(data.notebook, id),
          false <- Cell.setup?(cell),
-         true <- offset != 0,
-         true <- can_move_cell_by?(data, cell, section, offset) do
+         true <- can_move_cell_to_section?(data, cell, section, section_id) do
       data
       |> with_actions()
-      |> move_cell(cell, offset)
+      |> move_cell(cell, section_id, index)
       |> update_validity_and_evaluation()
       |> update_smart_cell_bases(data)
       |> set_dirty()
@@ -551,15 +565,42 @@ defmodule Livebook.Session.Data do
     end
   end
 
-  def apply_operation(data, {:move_section, _client_id, id, offset}) do
+  def apply_operation(data, {:move_section, _client_id, id, index}) do
     with {:ok, section} <- Notebook.fetch_section(data.notebook, id),
-         true <- offset != 0,
-         true <- Notebook.can_move_section_by?(data.notebook, section, offset) do
+         current_idx = Notebook.section_index(data.notebook, id),
+         true <- index != current_idx,
+         true <- Notebook.can_move_section_to?(data.notebook, section, index) do
       data
       |> with_actions()
-      |> move_section(section, offset)
+      |> move_section(section, index)
       |> update_validity_and_evaluation()
       |> update_smart_cell_bases(data)
+      |> set_dirty()
+      |> wrap_ok()
+    else
+      _ -> :error
+    end
+  end
+
+  def apply_operation(data, {:enable_language, _client_id, language}) do
+    with false <- language in Notebook.enabled_languages(data.notebook) do
+      data
+      |> with_actions()
+      |> enable_language(language)
+      |> update_validity_and_evaluation()
+      |> set_dirty()
+      |> wrap_ok()
+    else
+      _ -> :error
+    end
+  end
+
+  def apply_operation(data, {:disable_language, _client_id, language}) do
+    with true <- language in Notebook.enabled_languages(data.notebook) do
+      data
+      |> with_actions()
+      |> disable_language(language)
+      |> update_validity_and_evaluation()
       |> set_dirty()
       |> wrap_ok()
     else
@@ -581,10 +622,11 @@ defmodule Livebook.Session.Data do
 
       data
       |> with_actions()
-      |> queue_prerequisite_cells_evaluation(cell_ids)
       |> reduce(cells_with_section, fn data_actions, {cell, section} ->
         queue_cell_evaluation(data_actions, cell, section, evaluation_opts)
       end)
+      |> queue_prerequisite_cells_evaluation(cell_ids)
+      |> maybe_queue_other_setup_cells(evaluation_opts)
       |> maybe_connect_runtime(data)
       |> update_validity_and_evaluation()
       |> wrap_ok()
@@ -719,8 +761,8 @@ defmodule Livebook.Session.Data do
          true <- eval_info.validity in [:evaluated, :stale] do
       data
       |> with_actions()
-      |> queue_prerequisite_cells_evaluation([cell.id])
       |> queue_cell_evaluation(cell, section)
+      |> queue_prerequisite_cells_evaluation([cell.id])
       |> maybe_evaluate_queued()
       |> wrap_ok()
     else
@@ -1000,7 +1042,7 @@ defmodule Livebook.Session.Data do
   end
 
   def apply_operation(data, {:set_notebook_hub, _client_id, id}) do
-    with {:ok, hub} <- Hubs.fetch_hub(id) do
+    with {:ok, hub} <- Livebook.Hubs.fetch_hub(id) do
       data
       |> with_actions()
       |> set_notebook_hub(hub)
@@ -1024,6 +1066,22 @@ defmodule Livebook.Session.Data do
     |> with_actions()
     |> sync_hub_secrets()
     |> update_notebook_hub_secret_names()
+    |> set_dirty()
+    |> wrap_ok()
+  end
+
+  def apply_operation(data, {:sync_hub_file_systems, _client_id}) do
+    data
+    |> with_actions()
+    |> sync_hub_file_systems()
+    |> set_dirty()
+    |> wrap_ok()
+  end
+
+  def apply_operation(data, {:sync_hub_app_folders, _client_id}) do
+    data
+    |> with_actions()
+    |> sync_hub_app_folders()
     |> set_dirty()
     |> wrap_ok()
   end
@@ -1254,28 +1312,26 @@ defmodule Livebook.Session.Data do
     |> set!(bin_entries: List.delete(data.bin_entries, cell_bin_entry))
   end
 
-  defp can_move_cell_by?(data, cell, section, offset) do
+  defp can_move_cell_to_section?(data, cell, section, new_section_id) do
     case data.cell_infos[cell.id] do
       %{eval: %{status: :evaluating}} ->
-        notebook = Notebook.move_cell(data.notebook, cell.id, offset)
-        {:ok, _cell, new_section} = Notebook.fetch_cell_and_section(notebook, cell.id)
-        section.id == new_section.id
+        section.id == new_section_id
 
       _info ->
         true
     end
   end
 
-  defp move_cell({data, _} = data_actions, cell, offset) do
-    updated_notebook = Notebook.move_cell(data.notebook, cell.id, offset)
+  defp move_cell({data, _} = data_actions, cell, section_id, index) do
+    updated_notebook = Notebook.move_cell(data.notebook, cell.id, section_id, index)
 
     data_actions
     |> set!(notebook: updated_notebook)
     |> unqueue_cells_after_moved(data.notebook)
   end
 
-  defp move_section({data, _} = data_actions, section, offset) do
-    updated_notebook = Notebook.move_section(data.notebook, section.id, offset)
+  defp move_section({data, _} = data_actions, section, index) do
+    updated_notebook = Notebook.move_section(data.notebook, section.id, index)
 
     data_actions
     |> set!(notebook: updated_notebook)
@@ -1335,6 +1391,36 @@ defmodule Livebook.Session.Data do
         [child_id | visited]
       )
     end
+  end
+
+  defp enable_language({data, _} = data_actions, language) do
+    notebook = Notebook.add_extra_setup_cell(data.notebook, language)
+    cell = Notebook.get_extra_setup_cell(notebook, language)
+
+    set!(data_actions,
+      notebook: %{notebook | default_language: language},
+      cell_infos: Map.put(data.cell_infos, cell.id, new_cell_info(cell, data.clients_map))
+    )
+  end
+
+  defp disable_language({data, _} = data_actions, language) do
+    cell = Notebook.get_extra_setup_cell(data.notebook, language)
+    section = data.notebook.setup_section
+    info = data.cell_infos[cell.id]
+
+    data_actions =
+      if Cell.evaluable?(cell) and not pristine_evaluation?(info.eval) do
+        data_actions
+        |> cancel_cell_evaluation(cell, section)
+        |> add_action({:forget_evaluation, cell, section})
+      else
+        data_actions
+      end
+
+    set!(data_actions,
+      notebook: %{Notebook.delete_cell(data.notebook, cell.id) | default_language: :elixir}
+    )
+    |> delete_cell_info(cell)
   end
 
   defp queue_cell_evaluation(data_actions, cell, section, evaluation_opts \\ []) do
@@ -1431,10 +1517,13 @@ defmodule Livebook.Session.Data do
           do: {cell_id, eval_info.snapshot},
           into: %{}
 
+    enabled_languages = Notebook.enabled_languages(eval_data.notebook)
+
     # We compute evaluation snapshot based on the notebook state prior
     # to evaluation, but using the information about the dependencies
     # obtained during evaluation (identifiers, inputs)
-    evaluation_snapshot = cell_snapshot(cell, section, graph, cell_snapshots, eval_data)
+    evaluation_snapshot =
+      cell_snapshot(cell, section, graph, cell_snapshots, enabled_languages, eval_data)
 
     data_actions
     |> update_cell_eval_info!(
@@ -1481,8 +1570,27 @@ defmodule Livebook.Session.Data do
     queue_prerequisite_cells_evaluation(data_actions, trailing_queued_cell_ids)
   end
 
+  defp maybe_queue_other_setup_cells({data, _} = data_actions, evaluation_opts) do
+    # If one of the setup cells is queued, we automatically queue the
+    # subsequent ones
+
+    {queued, rest} =
+      Enum.split_while(data.notebook.setup_section.cells, fn cell ->
+        data.cell_infos[cell.id].eval.status == :queued
+      end)
+
+    if queued != [] and rest != [] do
+      data_actions
+      |> reduce(rest, fn data_actions, cell ->
+        queue_cell_evaluation(data_actions, cell, data.notebook.setup_section, evaluation_opts)
+      end)
+    else
+      data_actions
+    end
+  end
+
   defp maybe_evaluate_queued(data_actions) do
-    {data, _} = data_actions = check_setup_cell_for_reevaluation(data_actions)
+    {data, _} = data_actions = check_setup_cells_for_reevaluation(data_actions)
 
     if data.runtime_status == :connected do
       main_flow_evaluating? = main_flow_evaluating?(data)
@@ -1533,40 +1641,43 @@ defmodule Livebook.Session.Data do
     end
   end
 
-  defp check_setup_cell_for_reevaluation({data, _} = data_actions) do
+  defp check_setup_cells_for_reevaluation({data, _} = data_actions) do
     # When setup cell has been evaluated and is queued again, we need
     # to reconnect the runtime to get a fresh evaluation environment
     # for setup. We subsequently queue all cells that are currently
     # queued
 
-    case data.cell_infos[Cell.setup_cell_id()].eval do
-      %{status: :queued, validity: :evaluated} when data.runtime_status == :connected ->
-        queued_cells_with_section =
-          data.notebook
-          |> Notebook.evaluable_cells_with_section()
-          |> Enum.filter(fn {cell, _} ->
-            data.cell_infos[cell.id].eval.status == :queued
-          end)
-          |> Enum.map(fn {cell, section} ->
-            {cell, section, data.cell_infos[cell.id].eval.evaluation_opts}
-          end)
+    setup_cell_evaluated_and_queued? =
+      Enum.any?(data.notebook.setup_section.cells, fn cell ->
+        match?(%{status: :queued, validity: :evaluated}, data.cell_infos[cell.id].eval)
+      end)
 
-        cell_ids =
-          for {cell, _section, _evaluation_opts} <- queued_cells_with_section, do: cell.id
+    if setup_cell_evaluated_and_queued? and data.runtime_status == :connected do
+      queued_cells_with_section =
+        data.notebook
+        |> Notebook.evaluable_cells_with_section()
+        |> Enum.filter(fn {cell, _} ->
+          data.cell_infos[cell.id].eval.status == :queued
+        end)
+        |> Enum.map(fn {cell, section} ->
+          {cell, section, data.cell_infos[cell.id].eval.evaluation_opts}
+        end)
 
-        data_actions
-        |> disconnect_runtime()
-        |> connect_runtime()
-        |> queue_prerequisite_cells_evaluation(cell_ids)
-        |> reduce(
-          queued_cells_with_section,
-          fn data_actions, {cell, section, evaluation_opts} ->
-            queue_cell_evaluation(data_actions, cell, section, evaluation_opts)
-          end
-        )
+      cell_ids =
+        for {cell, _section, _evaluation_opts} <- queued_cells_with_section, do: cell.id
 
-      _ ->
-        data_actions
+      data_actions
+      |> disconnect_runtime()
+      |> connect_runtime()
+      |> reduce(
+        queued_cells_with_section,
+        fn data_actions, {cell, section, evaluation_opts} ->
+          queue_cell_evaluation(data_actions, cell, section, evaluation_opts)
+        end
+      )
+      |> queue_prerequisite_cells_evaluation(cell_ids)
+    else
+      data_actions
     end
   end
 
@@ -1715,6 +1826,7 @@ defmodule Livebook.Session.Data do
       |> Notebook.parent_cells_with_section(cell_ids)
       |> Enum.filter(fn {cell, _section} ->
         info = data.cell_infos[cell.id]
+
         Cell.evaluable?(cell) and cell_outdated?(data, cell.id) and info.eval.status == :ready
       end)
       |> Enum.reverse()
@@ -1862,7 +1974,9 @@ defmodule Livebook.Session.Data do
         | hub_id: hub.id,
           teams_enabled: is_struct(hub, Livebook.Hubs.Team)
       },
-      hub_secrets: Hubs.get_secrets(hub)
+      hub_secrets: Livebook.Hubs.get_secrets(hub),
+      hub_file_systems: Livebook.Hubs.get_file_systems(hub),
+      hub_app_folders: Livebook.Hubs.Provider.get_app_folders(hub)
     )
   end
 
@@ -1874,6 +1988,18 @@ defmodule Livebook.Session.Data do
     hub = Livebook.Hubs.fetch_hub!(data.notebook.hub_id)
     secrets = Livebook.Hubs.get_secrets(hub)
     set!(data_actions, hub_secrets: secrets)
+  end
+
+  defp sync_hub_file_systems({data, _} = data_actions) do
+    hub = Livebook.Hubs.fetch_hub!(data.notebook.hub_id)
+    file_systems = Livebook.Hubs.get_file_systems(hub)
+    set!(data_actions, hub_file_systems: file_systems)
+  end
+
+  defp sync_hub_app_folders({data, _} = data_actions) do
+    hub = Livebook.Hubs.fetch_hub!(data.notebook.hub_id)
+    app_folders = Livebook.Hubs.Provider.get_app_folders(hub)
+    set!(data_actions, hub_app_folders: app_folders)
   end
 
   defp update_notebook_hub_secret_names({data, _} = data_actions) do
@@ -2550,9 +2676,11 @@ defmodule Livebook.Session.Data do
 
     cells_with_section = Notebook.evaluable_cells_with_section(data.notebook)
 
+    enabled_languages = Notebook.enabled_languages(data.notebook)
+
     cell_snapshots =
       Enum.reduce(cells_with_section, %{}, fn {cell, section}, cell_snapshots ->
-        snapshot = cell_snapshot(cell, section, graph, cell_snapshots, data)
+        snapshot = cell_snapshot(cell, section, graph, cell_snapshots, enabled_languages, data)
         put_in(cell_snapshots[cell.id], snapshot)
       end)
 
@@ -2564,8 +2692,14 @@ defmodule Livebook.Session.Data do
     end)
   end
 
-  defp cell_snapshot(cell, section, graph, cell_snapshots, data) do
+  defp cell_snapshot(cell, section, graph, cell_snapshots, enabled_languages, data) do
     info = data.cell_infos[cell.id]
+
+    language =
+      case cell do
+        %Cell.Code{language: language} -> language
+        _other -> nil
+      end
 
     # Note that this is an implication of the Elixir runtime, we want
     # to reevaluate as much as possible in a branch, rather than copying
@@ -2585,7 +2719,9 @@ defmodule Livebook.Session.Data do
       )
       |> Enum.sort()
 
-    deps = {is_branch?, parent_snapshots, identifier_versions, bound_input_current_hashes}
+    deps =
+      {enabled_languages, language, is_branch?, parent_snapshots, identifier_versions,
+       bound_input_current_hashes}
 
     :erlang.phash2(deps)
   end
@@ -2734,10 +2870,10 @@ defmodule Livebook.Session.Data do
     cell_ids = for {cell, _section} <- cells_to_reevaluate, do: cell.id
 
     data_actions
-    |> queue_prerequisite_cells_evaluation(cell_ids)
     |> reduce(cells_to_reevaluate, fn data_actions, {cell, section} ->
       queue_cell_evaluation(data_actions, cell, section)
     end)
+    |> queue_prerequisite_cells_evaluation(cell_ids)
   end
 
   defp app_update_execution_status({data, _} = data_actions)
@@ -2819,8 +2955,9 @@ defmodule Livebook.Session.Data do
   @spec cell_ids_for_full_evaluation(t(), list(Cell.id())) :: list(Cell.id())
   def cell_ids_for_full_evaluation(data, forced_cell_ids) do
     requires_reconnect? =
-      data.cell_infos[Cell.setup_cell_id()].eval.validity == :evaluated and
-        cell_outdated?(data, Cell.setup_cell_id())
+      Enum.any?(data.notebook.setup_section.cells, fn cell ->
+        data.cell_infos[cell.id].eval.validity == :evaluated and cell_outdated?(data, cell.id)
+      end)
 
     evaluable_cells_with_section = Notebook.evaluable_cells_with_section(data.notebook)
 

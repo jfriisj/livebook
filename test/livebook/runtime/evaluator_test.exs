@@ -157,17 +157,13 @@ defmodule Livebook.Runtime.EvaluatorTest do
 
     test "using livebook input sends input request to the caller", %{evaluator: evaluator} do
       code = """
-      ref = make_ref()
-      send(Process.group_leader(), {:io_request, self(), ref, {:livebook_get_input_value, "input1"}})
-
-      receive do
-        {:io_reply, ^ref, {:ok, value}} -> value
-      end
+      input = Kino.Input.number("Number")
+      Kino.Input.read(input)
       """
 
       Evaluator.evaluate_code(evaluator, :elixir, code, :code_1, [])
 
-      assert_receive {:runtime_evaluation_input_request, :code_1, reply_to, "input1"}
+      assert_receive {:runtime_evaluation_input_request, :code_1, reply_to, _input_id}
       send(reply_to, {:runtime_evaluation_input_reply, {:ok, 10}})
 
       assert_receive {:runtime_evaluation_response, :code_1, terminal_text(ansi_number(10)),
@@ -325,7 +321,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
       assert_receive {:runtime_evaluation_response, :code_1, error(message), metadata()},
                      2_000
 
-      assert clean_message(message) ==
+      assert clean_message(message) =~
                """
                ** (ArithmeticError) bad argument in arithmetic expression
                    nofile:3: Livebook.Runtime.EvaluatorTest.Stacktrace.Math.bad_math/0
@@ -380,7 +376,11 @@ defmodule Livebook.Runtime.EvaluatorTest do
       # The evaluation reference is the same, so the second one overrides
       # the first one and the first widget should eventually be killed.
 
-      Evaluator.evaluate_code(evaluator, :elixir, spawn_widget_code(), :code_1, [])
+      code = """
+      Kino.start_child!({Task, fn -> Process.sleep(:infinity) end})
+      """
+
+      Evaluator.evaluate_code(evaluator, :elixir, code, :code_1, [])
 
       assert_receive {:runtime_evaluation_response, :code_1, terminal_text(widget_pid1_string),
                       metadata()}
@@ -389,7 +389,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
 
       ref = Process.monitor(widget_pid1)
 
-      Evaluator.evaluate_code(evaluator, :elixir, spawn_widget_code(), :code_1, [])
+      Evaluator.evaluate_code(evaluator, :elixir, code, :code_1, [])
 
       assert_receive {:runtime_evaluation_response, :code_1, terminal_text(widget_pid2_string),
                       metadata()}
@@ -405,13 +405,20 @@ defmodule Livebook.Runtime.EvaluatorTest do
       # The widget is spawned from a process that terminates,
       # so the widget should terminate immediately as well
 
-      Evaluator.evaluate_code(
-        evaluator,
-        :elixir,
-        spawn_widget_from_terminating_process_code(),
-        :code_1,
-        []
-      )
+      code = """
+      parent = self()
+
+      spawn(fn ->
+        pid = Kino.start_child!({Task, fn -> Process.sleep(:infinity) end})
+        send(parent, {:widget_pid, pid})
+      end)
+
+      receive do
+        {:widget_pid, pid} -> pid
+      end
+      """
+
+      Evaluator.evaluate_code(evaluator, :elixir, code, :code_1, [])
 
       assert_receive {:runtime_evaluation_response, :code_1, terminal_text(widget_pid1_string),
                       metadata()}
@@ -697,7 +704,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
                       %{
                         column: 6,
                         details:
-                          "\e[31m** (Protocol.UndefinedError) protocol Enumerable not implemented for type Integer. " <>
+                          "\e[31m** (Protocol.UndefinedError) protocol Enumerable not implemented " <>
                             _,
                         end_line: 10,
                         line: 9,
@@ -747,7 +754,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
       code = ~S'''
       defmodule Livebook.Runtime.EvaluatorTest.DoctestsGeneratedBase do
         defmacro __using__(_) do
-          quote do
+          quote generated: true do
             @doc """
 
                 iex> 1
@@ -779,7 +786,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
       code = ~S'''
       defmodule Livebook.Runtime.EvaluatorTest.DoctestsGeneratedBase do
         defmacro __using__(_) do
-          quote do
+          quote generated: true do
             @doc """
 
                 iex> 1
@@ -1298,7 +1305,11 @@ defmodule Livebook.Runtime.EvaluatorTest do
     end
 
     test "kills widgets that no evaluation points to", %{evaluator: evaluator} do
-      Evaluator.evaluate_code(evaluator, :elixir, spawn_widget_code(), :code_1, [])
+      code = """
+      Kino.start_child!({Task, fn -> Process.sleep(:infinity) end})
+      """
+
+      Evaluator.evaluate_code(evaluator, :elixir, code, :code_1, [])
 
       assert_receive {:runtime_evaluation_response, :code_1, terminal_text(widget_pid1_string),
                       metadata()}
@@ -1377,7 +1388,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
   end
 
   describe "erlang evaluation" do
-    test "evaluate erlang code", %{evaluator: evaluator} do
+    test "evaluates erlang code", %{evaluator: evaluator} do
       Evaluator.evaluate_code(
         evaluator,
         :erlang,
@@ -1390,7 +1401,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
     end
 
     @tag :with_ebin_path
-    test "evaluate erlang-module code", %{evaluator: evaluator} do
+    test "evaluates erlang-module code", %{evaluator: evaluator} do
       code = """
       -module(tryme).
 
@@ -1410,7 +1421,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
     end
 
     @tag tmp_dir: false
-    test "evaluate erlang-module code without filesystem", %{evaluator: evaluator} do
+    test "evaluates erlang-module code without filesystem", %{evaluator: evaluator} do
       code = """
       -module(tryme).
 
@@ -1425,7 +1436,7 @@ defmodule Livebook.Runtime.EvaluatorTest do
     end
 
     @tag :with_ebin_path
-    test "evaluate erlang-module error", %{
+    test "evaluates erlang-module error", %{
       evaluator: evaluator
     } do
       code = """
@@ -1560,18 +1571,142 @@ defmodule Livebook.Runtime.EvaluatorTest do
       Evaluator.evaluate_code(evaluator, :erlang, "list_to_binary(1).", :code_4, [])
       assert_receive {:runtime_evaluation_response, :code_4, error(message), metadata()}
 
-      assert clean_message(message) === """
+      assert clean_message(message) =~ """
              exception error: bad argument
                in function  list_to_binary/1
                   called as list_to_binary(1)
                   *** argument 1: not an iolist term
-               in call from erl_eval:do_apply/7 (erl_eval.erl, line 915)\
+               in call from erl_eval:do_apply/7 (erl_eval.erl\
              """
     end
   end
 
+  describe "python evaluation" do
+    @describetag :python
+
+    test "evaluates python code", %{evaluator: evaluator} do
+      code = """
+      x = [1, 2, 3]
+      sum(x)
+      """
+
+      Evaluator.evaluate_code(evaluator, :python, code, :code_1, [])
+
+      assert_receive {:runtime_evaluation_response, :code_1, terminal_text("6"), metadata()}
+    end
+
+    test "uses and defines binding", %{evaluator: evaluator} do
+      Evaluator.evaluate_code(evaluator, :elixir, "x = 1", :code_1, [])
+      assert_receive {:runtime_evaluation_response, :code_1, _, metadata()}
+
+      Evaluator.evaluate_code(evaluator, :python, "y = x", :code_2, [:code_1])
+      assert_receive {:runtime_evaluation_response, :code_2, _, metadata()}
+
+      Evaluator.evaluate_code(evaluator, :elixir, "z = y", :code_3, [:code_2, :code_1])
+      assert_receive {:runtime_evaluation_response, :code_3, _, metadata()}
+
+      %{binding: binding} =
+        Evaluator.get_evaluation_context(evaluator, [:code_3, :code_2, :code_1])
+
+      assert [{:z, %Pythonx.Object{}}, {:y, %Pythonx.Object{}}, {:x, 1}] = binding
+    end
+
+    test "undefined variable error", %{evaluator: evaluator} do
+      Evaluator.evaluate_code(evaluator, :python, "x + 1", :code_1, [])
+
+      assert_receive {:runtime_evaluation_response, :code_1, error(message),
+                      %{
+                        code_markers: [
+                          %{
+                            line: 1,
+                            description: "NameError: name 'x' is not defined",
+                            severity: :error
+                          }
+                        ]
+                      }}
+
+      assert clean_message(message) == """
+             Traceback (most recent call last):
+               File "<string>", line 1, in <module>
+             NameError: name 'x' is not defined
+             """
+    end
+
+    test "syntax error", %{evaluator: evaluator} do
+      Evaluator.evaluate_code(evaluator, :python, "1 +", :code_1, [])
+
+      assert_receive {:runtime_evaluation_response, :code_1, error(message),
+                      %{
+                        code_markers: [
+                          %{
+                            line: 1,
+                            description: "SyntaxError: invalid syntax",
+                            severity: :error
+                          }
+                        ]
+                      }}
+
+      assert clean_message(message) == """
+               File "<unknown>", line 1
+                 1 +
+                    ^
+             SyntaxError: invalid syntax
+             """
+    end
+
+    test "runtime error", %{evaluator: evaluator} do
+      Evaluator.evaluate_code(evaluator, :python, "import unknown", :code_1, [])
+
+      assert_receive {:runtime_evaluation_response, :code_1, error(message),
+                      %{
+                        code_markers: [
+                          %{
+                            line: 1,
+                            description: "ModuleNotFoundError: No module named 'unknown'",
+                            severity: :error
+                          }
+                        ]
+                      }}
+
+      assert clean_message(message) == """
+             Traceback (most recent call last):
+               File "<string>", line 1, in <module>
+             ModuleNotFoundError: No module named 'unknown'
+             """
+    end
+
+    test "captures standard output and sends it to the caller", %{evaluator: evaluator} do
+      code = """
+      print("hello from Python")
+      """
+
+      Evaluator.evaluate_code(evaluator, :python, code, :code_1, [])
+
+      assert_receive {:runtime_evaluation_output, :code_1,
+                      terminal_text("hello from Python\n", true)}
+    end
+
+    test "captures standard error and sends it to the caller", %{evaluator: evaluator} do
+      code = """
+      import sys
+      print("error from Python", file=sys.stderr)
+      """
+
+      Evaluator.evaluate_code(evaluator, :python, code, :code_1, [])
+
+      assert_receive {:runtime_evaluation_output, :code_1,
+                      terminal_text("error from Python\n", true)}
+    end
+  end
+
   describe "formatting" do
+    @tag :capture_log
     test "gracefully handles errors in the inspect protocol", %{evaluator: evaluator} do
+      # First Kino.Render will be called and raise on inspect, in which
+      # case we log an error (hence the capture_log above). Then as a
+      # fallback inspect is called and also raises. We expect to get an
+      # error output, rather than anything crashing.
+
       code = "%Livebook.TestModules.BadInspect{}"
       Evaluator.evaluate_code(evaluator, :elixir, code, :code_1, [], file: "file.ex")
 
@@ -1579,69 +1714,5 @@ defmodule Livebook.Runtime.EvaluatorTest do
 
       assert message =~ ":bad_return"
     end
-  end
-
-  # Helpers
-
-  # Returns a code that spawns a widget process, registers
-  # a pointer for it and adds monitoring, then returns widget
-  # pid from the evaluation
-  defp spawn_widget_code() do
-    """
-    widget_pid = spawn(fn ->
-      receive do
-        :stop -> :ok
-      end
-    end)
-
-    ref = make_ref()
-    send(Process.group_leader(), {:io_request, self(), ref, {:livebook_reference_object, widget_pid, self()}})
-
-    receive do
-      {:io_reply, ^ref, :ok} -> :ok
-    end
-
-    send(Process.group_leader(), {:io_request, self(), ref, {:livebook_monitor_object, widget_pid, widget_pid, :stop}})
-
-    receive do
-      {:io_reply, ^ref, :ok} -> :ok
-    end
-
-    widget_pid
-    """
-  end
-
-  defp spawn_widget_from_terminating_process_code() do
-    """
-    parent = self()
-
-    # Arbitrary process that spawns the widget and terminates afterwards
-    spawn(fn ->
-      widget_pid = spawn(fn ->
-        receive do
-          :stop -> :ok
-        end
-      end)
-
-      ref = make_ref()
-      send(Process.group_leader(), {:io_request, self(), ref, {:livebook_reference_object, widget_pid, self()}})
-
-      receive do
-        {:io_reply, ^ref, :ok} -> :ok
-      end
-
-      send(Process.group_leader(), {:io_request, self(), ref, {:livebook_monitor_object, widget_pid, widget_pid, :stop}})
-
-      receive do
-        {:io_reply, ^ref, :ok} -> :ok
-      end
-
-      send(parent, {:widget_pid, widget_pid})
-    end)
-
-    receive do
-      {:widget_pid, widget_pid} -> widget_pid
-    end
-    """
   end
 end

@@ -6,6 +6,8 @@ defmodule Livebook.Config do
           | %{mode: :token, secret: String.t()}
           | %{mode: :disabled}
 
+  @type authentication_mode :: :password | :token | :disabled
+
   @doc """
   Returns path to Livebook priv directory.
 
@@ -16,6 +18,16 @@ defmodule Livebook.Config do
   @spec priv_path() :: String.t()
   def priv_path() do
     Application.get_env(:livebook, :priv_dir) || Application.app_dir(:livebook, "priv")
+  end
+
+  @doc """
+  Returns container image registry URL.
+
+  This returns the usual container image registry URL, and allows users to specify a custom URL.
+  """
+  @spec image_registry_url() :: String.t()
+  def image_registry_url() do
+    Application.get_env(:livebook, :image_registry_url) || "ghcr.io/livebook-dev/livebook"
   end
 
   @doc """
@@ -131,6 +143,14 @@ defmodule Livebook.Config do
   end
 
   @doc """
+  Returns the apps top banner.
+  """
+  @spec apps_banner() :: String.t() | nil
+  def apps_banner() do
+    Application.get_env(:livebook, :apps_banner)
+  end
+
+  @doc """
   Returns the apps path.
   """
   @spec apps_path() :: String.t() | nil
@@ -195,9 +215,9 @@ defmodule Livebook.Config do
   Returns if this instance is running with teams auth,
   i.e. if there an online or offline hub created on boot.
   """
-  @spec teams_auth?() :: boolean()
-  def teams_auth?() do
-    Application.fetch_env!(:livebook, :teams_auth?)
+  @spec teams_auth() :: :online | :offline | nil
+  def teams_auth() do
+    Application.fetch_env!(:livebook, :teams_auth)
   end
 
   @doc """
@@ -253,11 +273,11 @@ defmodule Livebook.Config do
   def identity_provider() do
     case Application.fetch_env(:livebook, :identity_provider) do
       {:ok, result} -> result
-      :error -> {:session, Livebook.ZTA.PassThrough, :unused}
+      :error -> {:session, NimbleZTA.PassThrough, :unused}
     end
   end
 
-  @identity_provider_no_id [Livebook.ZTA.BasicAuth, Livebook.ZTA.PassThrough]
+  @identity_provider_no_id [NimbleZTA.BasicAuth, NimbleZTA.PassThrough]
 
   @doc """
   Returns if the identity data is readonly.
@@ -394,7 +414,7 @@ defmodule Livebook.Config do
   Returns whether running at the desktop app.
   """
   @spec app?() :: boolean()
-  def app?(), do: @app?
+  def app?(), do: !!@app?
 
   @doc """
   Returns the GitHub org/repo where the releases are created.
@@ -474,6 +494,23 @@ defmodule Livebook.Config do
       for item <- String.split(metadata, ","),
           key = String.trim(item),
           do: String.to_atom(key)
+    end
+  end
+
+  @doc """
+  Parses and validates log format from env.
+  """
+  def log_format!(env) do
+    formats = ~w(text json)
+
+    if format = System.get_env(env) do
+      if format in formats do
+        String.to_atom(format)
+      else
+        abort!(
+          "expected #{env} to be one of #{Enum.join(formats, ", ")}, got: #{inspect(format)}"
+        )
+      end
     end
   end
 
@@ -645,6 +682,13 @@ defmodule Livebook.Config do
   end
 
   @doc """
+  Parses image registry from env.
+  """
+  def image_registry_url!(env) do
+    System.get_env(env)
+  end
+
+  @doc """
   Parses and validates default runtime from env.
   """
   def default_runtime!(env) do
@@ -698,6 +742,16 @@ defmodule Livebook.Config do
   end
 
   @doc """
+  Parses the apps banner from env.
+  """
+  def apps_banner!(env) do
+    case System.get_env(env) do
+      value when value in ["", nil] -> nil
+      value -> value
+    end
+  end
+
+  @doc """
   Parses and validates allowed URI schemes from env.
   """
   def allowed_uri_schemes!(env) do
@@ -722,10 +776,10 @@ defmodule Livebook.Config do
   end
 
   @identity_providers %{
-    "basic_auth" => Livebook.ZTA.BasicAuth,
-    "cloudflare" => Livebook.ZTA.Cloudflare,
-    "google_iap" => Livebook.ZTA.GoogleIAP,
-    "tailscale" => Livebook.ZTA.Tailscale
+    "basic_auth" => NimbleZTA.BasicAuth,
+    "cloudflare" => NimbleZTA.Cloudflare,
+    "google_iap" => NimbleZTA.GoogleIAP,
+    "tailscale" => NimbleZTA.Tailscale
   }
 
   @doc """

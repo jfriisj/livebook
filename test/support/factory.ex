@@ -21,7 +21,8 @@ defmodule Livebook.Factory do
       org_id: 1,
       user_id: 1,
       org_key_id: 1,
-      org_public_key: Livebook.Hubs.Team.public_key_prefix() <> Livebook.Utils.random_long_id(),
+      org_public_key:
+        Livebook.Teams.Constants.public_key_prefix() <> Livebook.Utils.random_long_id(),
       teams_key: org.teams_key,
       session_token: Livebook.Utils.random_short_id(),
       offline: nil
@@ -62,7 +63,8 @@ defmodule Livebook.Factory do
       mode: :offline,
       agent_keys: [],
       secrets: [],
-      environment_variables: []
+      environment_variables: [],
+      authorization_groups: []
     }
   end
 
@@ -78,16 +80,37 @@ defmodule Livebook.Factory do
 
   def build(:fs_s3) do
     bucket_url = "https://#{unique_value("mybucket-")}.s3.amazonaws.com"
-    hash = :crypto.hash(:sha256, bucket_url)
     hub_id = Livebook.Hubs.Personal.id()
 
     %Livebook.FileSystem.S3{
-      id: "#{hub_id}-s3-#{Base.url_encode64(hash, padding: false)}",
+      id: Livebook.FileSystem.Utils.id("s3", hub_id, bucket_url),
       bucket_url: bucket_url,
-      external_id: nil,
       region: "us-east-1",
       access_key_id: "key",
       secret_access_key: "secret",
+      external_id: nil,
+      hub_id: hub_id
+    }
+  end
+
+  def build(:fs_git) do
+    repo_url = "git@github.com:livebook-dev/test.git"
+    hub_id = Livebook.Hubs.Personal.id()
+
+    # When the user paste the ssh key to the password input, it will remove the break lines.
+    # So, the changeset need to normalize it before persisting. That said, the ssh key from
+    # factory must be "denormalized" so we can test the user scenario.
+    key =
+      System.get_env("TEST_GIT_SSH_KEY")
+      |> String.replace("\n", "\s")
+      |> String.trim()
+
+    %Livebook.FileSystem.Git{
+      id: Livebook.FileSystem.Utils.id("git", hub_id, repo_url),
+      repo_url: repo_url,
+      branch: "main",
+      key: key,
+      external_id: nil,
       hub_id: hub_id
     }
   end
@@ -123,6 +146,7 @@ defmodule Livebook.Factory do
       access_type: :protected,
       hub_id: Livebook.Hubs.Personal.id(),
       deployment_group_id: "1",
+      authorization_groups: [],
       deployed_by: "Ada Lovelace",
       deployed_at: deployed_at
     }
@@ -135,6 +159,22 @@ defmodule Livebook.Factory do
       hub_id: Livebook.Hubs.Personal.id(),
       org_id: "1",
       deployment_group_id: "1"
+    }
+  end
+
+  def build(:app_folder) do
+    %Livebook.Teams.AppFolder{
+      id: "#{unique_integer()}",
+      name: unique_value("app_folder")
+    }
+  end
+
+  def build(:notification) do
+    %Livebook.Teams.Notification{
+      id: "1",
+      kind: "warning",
+      message:
+        "This Livebook version will not be compatible with a future version of Livebook Teams."
     }
   end
 

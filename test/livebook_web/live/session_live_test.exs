@@ -5,7 +5,7 @@ defmodule LivebookWeb.SessionLiveTest do
   import Livebook.TestHelpers
   import Phoenix.LiveViewTest
 
-  alias Livebook.{Sessions, Session, Settings, Runtime, Users, FileSystem}
+  alias Livebook.{Sessions, Session, Settings, Runtime, FileSystem}
   alias Livebook.Notebook.Cell
 
   setup do
@@ -161,9 +161,11 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{[data-el-session]})
       |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id,
-                       terminal_text("\e[32m\"true\"\e[0m"), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id,
+                         terminal_text("\e[32m\"true\"\e[0m"), _}
+                      ]}
     end
 
     test "cancelling cell evaluation", %{conn: conn, session: session} do
@@ -469,138 +471,113 @@ defmodule LivebookWeb.SessionLiveTest do
                Session.get_data(session.pid)
     end
 
-    test "editing input field in cell output", %{conn: conn, session: session, test: test} do
+    test "editing input field in cell output", %{conn: conn, session: session} do
       section_id = insert_section(session.pid)
-
-      Process.register(self(), test)
-
-      input = %{
-        type: :input,
-        ref: "ref1",
-        id: "input1",
-        destination: test,
-        attrs: %{type: :number, default: 1, label: "Name", debounce: :blur}
-      }
 
       Session.subscribe(session.id)
 
-      insert_cell_with_output(session.pid, section_id, input)
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        input = Kino.Input.number("Number", default: 1)
+        """)
+
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
 
       view
-      |> element(~s/[data-el-outputs-container] form/)
+      |> element(~s/[data-el-output] form/)
       |> render_change(%{"html_value" => "10"})
 
-      assert %{input_infos: %{"input1" => %{value: 10}}} = Session.get_data(session.pid)
-
-      assert_receive {:event, "ref1", %{value: 10, type: :change}}
+      data = Session.get_data(session.pid)
+      assert [{_id, %{value: 10}}] = Map.to_list(data.input_infos)
     end
 
-    test "newlines in text input are normalized", %{conn: conn, session: session, test: test} do
-      section_id = insert_section(session.pid)
-
-      Process.register(self(), test)
-
-      input = %{
-        type: :input,
-        ref: "ref1",
-        id: "input1",
-        destination: test,
-        attrs: %{
-          type: :textarea,
-          default: "hey",
-          label: "Name",
-          debounce: :blur,
-          monospace: false
-        }
-      }
-
+    test "newlines in text input are normalized", %{conn: conn, session: session} do
       Session.subscribe(session.id)
 
-      insert_cell_with_output(session.pid, section_id, input)
+      section_id = insert_section(session.pid)
+
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        Kino.Input.textarea("Name", default: "hey")
+        """)
+
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
 
       view
-      |> element(~s/[data-el-outputs-container] form/)
+      |> element(~s/[data-el-output] form/)
       |> render_change(%{"html_value" => "line\r\nline"})
 
-      assert %{input_infos: %{"input1" => %{value: "line\nline"}}} = Session.get_data(session.pid)
+      data = Session.get_data(session.pid)
+      assert [{_id, %{value: "line\nline"}}] = Map.to_list(data.input_infos)
     end
 
     test "form input changes are reflected only in local LV data",
-         %{conn: conn, session: session, test: test} do
-      section_id = insert_section(session.pid)
-
-      Process.register(self(), test)
-
-      form_control = %{
-        type: :control,
-        ref: "control_ref1",
-        destination: test,
-        attrs: %{
-          type: :form,
-          fields: [
-            name: %{
-              type: :input,
-              ref: "input_ref1",
-              id: "input1",
-              destination: test,
-              attrs: %{type: :text, default: "initial", label: "Name", debounce: :blur}
-            },
-            value: nil
-          ],
-          submit: "Send",
-          report_changes: %{},
-          reset_on_submit: []
-        }
-      }
-
+         %{conn: conn, session: session} do
       Session.subscribe(session.id)
 
-      insert_cell_with_output(session.pid, section_id, form_control)
+      section_id = insert_section(session.pid)
+
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        form =
+          Kino.Control.form(
+            [
+              name: Kino.Input.text("Name", default: "initial"),
+              value: nil
+            ],
+            submit: "Send"
+          )
+
+        # Send the submit event back to the test process to assert
+        # it was received.
+        Kino.listen(form, fn event ->
+          send(IEx.Helpers.pid("#{inspect(self())}"), {:form_event, event})
+        end)
+
+        form
+        """)
+
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
 
       view
-      |> element(~s/[data-el-outputs-container] form/)
+      |> element(~s/[data-el-output] form/)
       |> render_change(%{"html_value" => "sherlock"})
 
       # The new value is on the page
       assert render(view) =~ "sherlock"
       # but it's not reflected in the synchronized session data
-      assert %{input_infos: %{"input1" => %{value: "initial"}}} = Session.get_data(session.pid)
+      data = Session.get_data(session.pid)
+      assert [{_id, %{value: "initial"}}] = Map.to_list(data.input_infos)
 
       view
-      |> element(~s/[data-el-outputs-container] button/, "Send")
+      |> element(~s/[data-el-output] button/, "Send")
       |> render_click()
 
-      assert_receive {:event, "control_ref1",
-                      %{data: %{name: "sherlock", value: nil}, type: :submit}}
+      assert_receive {:form_event, %{data: %{name: "sherlock", value: nil}, type: :submit}}
     end
 
-    test "file input", %{conn: conn, session: session, test: test} do
-      section_id = insert_section(session.pid)
-
-      Process.register(self(), test)
-
-      input = %{
-        type: :input,
-        ref: "ref1",
-        id: "input1",
-        destination: test,
-        attrs: %{type: :file, default: nil, label: "File", accept: :any}
-      }
-
+    test "file input", %{conn: conn, session: session} do
       Session.subscribe(session.id)
 
-      insert_cell_with_output(session.pid, section_id, input)
+      section_id = insert_section(session.pid)
+
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        input = Kino.Input.file("File")
+        """)
+
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
 
       view
-      |> file_input(~s/[data-el-outputs-container] form/, :file, [
+      |> file_input(~s/[data-el-output] form/, :file, [
         %{
           last_modified: 1_594_171_879_000,
           name: "data.txt",
@@ -611,13 +588,93 @@ defmodule LivebookWeb.SessionLiveTest do
       ])
       |> render_upload("data.txt")
 
-      assert %{input_infos: %{"input1" => %{value: value}}} = Session.get_data(session.pid)
-
+      data = Session.get_data(session.pid)
+      assert [{_id, %{value: value}}] = Map.to_list(data.input_infos)
       assert %{file_ref: file_ref, client_name: "data.txt"} = value
 
       send(session.pid, {:runtime_file_path_request, self(), file_ref})
       assert_receive {:runtime_file_path_reply, {:ok, path}}
       assert File.read!(path) == "content"
+    end
+
+    test "enabling a language", %{conn: conn, session: session} do
+      {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
+
+      view
+      |> element("[data-el-language-buttons] button", "Python")
+      |> render_click()
+
+      assert %{
+               notebook: %{
+                 setup_section: %{cells: [%Cell.Code{}, %Cell.Code{language: :"pyproject.toml"}]},
+                 default_language: :python
+               }
+             } = Session.get_data(session.pid)
+
+      refute view
+             |> element("[data-el-language-buttons] button", "Python")
+             |> has_element?()
+    end
+
+    test "disabling a language", %{conn: conn, session: session} do
+      Session.enable_language(session.pid, :python)
+
+      {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
+
+      refute view
+             |> element("[data-el-language-buttons] button", "Python")
+             |> has_element?()
+
+      view
+      |> element(~s/button[phx-click="disable_language"]/)
+      |> render_click()
+
+      assert %{notebook: %{setup_section: %{cells: [%Cell.Code{}]}}} =
+               Session.get_data(session.pid)
+
+      assert view
+             |> element("[data-el-language-buttons] button", "Python")
+             |> has_element?()
+    end
+
+    test "changing cell language", %{conn: conn, session: session} do
+      {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
+
+      section_id = insert_section(session.pid)
+      cell_id = insert_text_cell(session.pid, section_id, :code)
+
+      view
+      |> element(~s/#cell-#{cell_id} button/, "Erlang")
+      |> render_click()
+
+      assert %{notebook: %{sections: [%{cells: [%Cell.Code{language: :erlang}]}]}} =
+               Session.get_data(session.pid)
+    end
+
+    test "shows an error when a cell language is not enabled", %{conn: conn, session: session} do
+      section_id = insert_section(session.pid)
+      cell_id = insert_text_cell(session.pid, section_id, :code)
+
+      Session.set_cell_attributes(session.pid, cell_id, %{language: :python})
+
+      {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
+
+      assert render(view) =~ "Python is not enabled for the current notebook."
+      assert render(view) =~ "Enable Python"
+    end
+
+    test "setting cell output size", %{conn: conn, session: session} do
+      section_id = insert_section(session.pid)
+      cell_id = insert_text_cell(session.pid, section_id, :code)
+
+      {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
+
+      view
+      |> element(~s/[data-p-cell-id='"#{cell_id}"'] [aria-label="toggle output size"]/)
+      |> render_click()
+
+      assert %{notebook: %{sections: [%{cells: [%Cell.Code{output_size: :wide}]}]}} =
+               Session.get_data(session.pid)
     end
   end
 
@@ -649,32 +706,33 @@ defmodule LivebookWeb.SessionLiveTest do
       evaluate_setup(session.pid)
 
       section_id = insert_section(session.pid)
-      cell_id = insert_text_cell(session.pid, section_id, :code)
 
-      Session.queue_cell_evaluation(session.pid, cell_id)
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        frame = Kino.Frame.new()
+        Kino.Frame.render(frame, "In frame")
+        frame
+        """)
 
-      frame = %{type: :frame, ref: "1", outputs: [terminal_text("In frame")], placeholder: true}
-      send(session.pid, {:runtime_evaluation_output, cell_id, frame})
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
-      assert render(view) =~ "In frame"
+      assert has_element?(view, "[data-el-output]", "In frame")
 
-      frame_update = %{
-        type: :frame_update,
-        ref: "1",
-        update: {:replace, [terminal_text("Updated frame")]}
-      }
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        Kino.Frame.render(frame, "Updated frame")
+        """)
 
-      send(session.pid, {:runtime_evaluation_output, cell_id, frame_update})
+      evaluate_cell(session.pid, cell_id)
 
       wait_for_session_update(session.pid)
 
       # Render once, so that frame send_update is processed
       _ = render(view)
 
-      content = render(view)
-      assert content =~ "Updated frame"
-      refute content =~ "In frame"
+      assert has_element?(view, "[data-el-output]", "Updated frame")
+      refute has_element?(view, "[data-el-output]", "In frame")
     end
 
     test "chunked text within frame output update", %{conn: conn, session: session} do
@@ -682,38 +740,33 @@ defmodule LivebookWeb.SessionLiveTest do
       evaluate_setup(session.pid)
 
       section_id = insert_section(session.pid)
-      cell_id = insert_text_cell(session.pid, section_id, :code)
 
-      Session.queue_cell_evaluation(session.pid, cell_id)
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, ~S"""
+        frame = Kino.Frame.new()
+        Kino.Frame.render(frame, Kino.Text.new("line 1\n", chunk: true))
+        frame
+        """)
 
-      frame = %{
-        type: :frame,
-        ref: "1",
-        outputs: [terminal_text("line 1\n", true)],
-        placeholder: true
-      }
-
-      send(session.pid, {:runtime_evaluation_output, cell_id, frame})
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
-      assert render(view) =~ "line 1"
+      assert has_element?(view, "[data-el-output]", "line 1")
 
-      frame_update = %{
-        type: :frame_update,
-        ref: "1",
-        update: {:append, [terminal_text("line 2\n", true)]}
-      }
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, ~S"""
+        Kino.Frame.append(frame, Kino.Text.new("line 2\n", chunk: true))
+        """)
 
-      send(session.pid, {:runtime_evaluation_output, cell_id, frame_update})
+      evaluate_cell(session.pid, cell_id)
 
       wait_for_session_update(session.pid)
 
       # Render once, so that frame send_update is processed
       _ = render(view)
 
-      content = render(view)
-      assert content =~ "line 1"
-      assert content =~ "line 2"
+      assert has_element?(view, "[data-el-output]", "line 1")
+      assert has_element?(view, "[data-el-output]", "line 2")
     end
 
     test "frame output update when within grid", %{conn: conn, session: session} do
@@ -721,33 +774,33 @@ defmodule LivebookWeb.SessionLiveTest do
       evaluate_setup(session.pid)
 
       section_id = insert_section(session.pid)
-      cell_id = insert_text_cell(session.pid, section_id, :code)
 
-      Session.queue_cell_evaluation(session.pid, cell_id)
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        frame = Kino.Frame.new()
+        Kino.Frame.render(frame, "In frame")
+        Kino.Layout.grid([frame])
+        """)
 
-      frame = %{type: :frame, ref: "1", outputs: [terminal_text("In frame")], placeholder: true}
-      grid = %{type: :grid, outputs: [frame], columns: ["Frame"], gap: 8, boxed: false}
-      send(session.pid, {:runtime_evaluation_output, cell_id, grid})
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
-      assert render(view) =~ "In frame"
+      assert has_element?(view, "[data-el-output]", "In frame")
 
-      frame_update = %{
-        type: :frame_update,
-        ref: "1",
-        update: {:replace, [terminal_text("Updated frame")]}
-      }
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        Kino.Frame.render(frame, "Updated frame")
+        """)
 
-      send(session.pid, {:runtime_evaluation_output, cell_id, frame_update})
+      evaluate_cell(session.pid, cell_id)
 
       wait_for_session_update(session.pid)
 
       # Render once, so that frame send_update is processed
       _ = render(view)
 
-      content = render(view)
-      assert content =~ "Updated frame"
-      refute content =~ "In frame"
+      assert has_element?(view, "[data-el-output]", "Updated frame")
+      refute has_element?(view, "[data-el-output]", "In frame")
     end
 
     test "client-specific output is sent only to one target", %{conn: conn, session: session} do
@@ -767,8 +820,11 @@ defmodule LivebookWeb.SessionLiveTest do
         {:runtime_evaluation_output_to, client_id, cell_id, terminal_text("line 1\n", true)}
       )
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_output, _, ^cell_id, terminal_text("line 1\n", true)}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_output, _, ^cell_id,
+                         terminal_text("line 1\n", true)}
+                      ]}
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
       refute render(view) =~ "line 1"
@@ -792,83 +848,69 @@ defmodule LivebookWeb.SessionLiveTest do
         {:runtime_evaluation_output_to_clients, cell_id, terminal_text("line 1\n")}
       )
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_output, _, ^cell_id, terminal_text("line 1\n")}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_output, _, ^cell_id, terminal_text("line 1\n")}
+                      ]}
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
       refute render(view) =~ "line 1"
     end
 
-    test "shows change indicator on bound inputs",
-         %{conn: conn, session: session, test: test} do
+    test "shows change indicator on bound inputs", %{conn: conn, session: session} do
       section_id = insert_section(session.pid)
-
-      Process.register(self(), test)
-
-      input = %{
-        type: :input,
-        ref: "ref1",
-        id: "input1",
-        destination: test,
-        attrs: %{type: :number, default: 1, label: "Name", debounce: :blur}
-      }
 
       Session.subscribe(session.id)
 
-      insert_cell_with_output(session.pid, section_id, input)
+      insert_text_cell(session.pid, section_id, :code, """
+      input = Kino.Input.number("Number", default: 1)
+      """)
 
-      code = source_for_input_read(input.id)
-      cell_id = insert_text_cell(session.pid, section_id, :code, code)
-      Session.queue_cell_evaluation(session.pid, cell_id)
-      assert_receive {:operation, {:add_cell_evaluation_response, _, ^cell_id, _, _}}
+      cell_id = insert_text_cell(session.pid, section_id, :code, "Kino.Input.read(input)")
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
 
       refute render(view) =~ "This input has changed."
 
-      Session.set_input_value(session.pid, input.id, 10)
+      view
+      |> element(~s/[data-el-output] form/)
+      |> render_change(%{"html_value" => "10"})
+
       wait_for_session_update(session.pid)
 
       assert render(view) =~ "This input has changed."
     end
 
-    test "frame output update with input", %{conn: conn, session: session, test: test} do
+    test "frame output update with input", %{conn: conn, session: session} do
       Session.subscribe(session.id)
       evaluate_setup(session.pid)
 
       section_id = insert_section(session.pid)
-      cell_id = insert_text_cell(session.pid, section_id, :code)
 
-      Session.queue_cell_evaluation(session.pid, cell_id)
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        frame = Kino.Frame.new()
+        """)
 
-      frame = %{type: :frame, ref: "1", outputs: [], placeholder: true}
-      send(session.pid, {:runtime_evaluation_output, cell_id, frame})
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
 
-      input = %{
-        type: :input,
-        ref: "ref1",
-        id: "input1",
-        destination: test,
-        attrs: %{type: :number, default: 1, label: "Input inside frame", debounce: :blur}
-      }
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, """
+        input = Kino.Input.number("Input inside frame", default: 1)
+        Kino.Frame.render(frame, input)
+        """)
 
-      frame_update = %{
-        type: :frame_update,
-        ref: "1",
-        update: {:replace, [input]}
-      }
-
-      send(session.pid, {:runtime_evaluation_output, cell_id, frame_update})
+      evaluate_cell(session.pid, cell_id)
 
       wait_for_session_update(session.pid)
 
       # Render once, so that frame send_update is processed
       _ = render(view)
 
-      content = render(view)
-      assert content =~ "Input inside frame"
+      assert has_element?(view, "[data-el-output]", "Input inside frame")
       assert has_element?(view, ~s/input[value="1"]/)
     end
   end
@@ -912,8 +954,8 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element("#runtime-settings-modal form")
       |> render_submit(%{data: %{}})
 
-      assert_receive {:operation, {:set_runtime, _pid, %Runtime.Standalone{}}}
-      assert_receive {:operation, {:runtime_connected, _pid, %Runtime.Standalone{} = runtime}}
+      assert_receive {:operations, [{:set_runtime, _pid, %Runtime.Standalone{}}]}
+      assert_receive {:operations, [{:runtime_connected, _pid, %Runtime.Standalone{} = runtime}]}
 
       assert_patch(view, "/sessions/#{session.id}")
       assert render(view) =~ Atom.to_string(runtime.node)
@@ -938,7 +980,7 @@ defmodule LivebookWeb.SessionLiveTest do
       node = :node@host
       send(session.pid, {:runtime_connected_nodes, [node]})
 
-      assert_receive {:operation, {:set_runtime_connected_nodes, _pid, _nodes}}
+      assert_receive {:operations, [{:set_runtime_connected_nodes, _pid, _nodes}]}
 
       refute render(view) =~ "No connected nodes"
       assert render(view) =~ "#{node}"
@@ -1546,6 +1588,21 @@ defmodule LivebookWeb.SessionLiveTest do
       refute render(view) =~ new_dir.path
       assert render(view) =~ old_dir.path
     end
+
+    test "switching to S3 file system in persistence dialog does not crash",
+         %{conn: conn, session: session} do
+      s3_fs = build(:fs_s3)
+      Livebook.HubHelpers.persist_file_system(s3_fs)
+
+      {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}/settings/file")
+
+      view
+      |> element(~s{button[phx-click="set_file_system"][phx-value-id="#{s3_fs.id}"]})
+      |> render_click()
+
+      # The component should handle the mount_file_system event without crashing
+      assert render(view) =~ "Save to file"
+    end
   end
 
   describe "completion" do
@@ -1684,11 +1741,11 @@ defmodule LivebookWeb.SessionLiveTest do
 
       {_, client_id} = Session.register_client(session.pid, client_pid, user1)
 
-      assert_receive {:operation, {:client_join, ^client_id, _user}}
+      assert_receive {:operations, [{:client_join, ^client_id, _user}]}
       assert render(view) =~ "Jake Peralta"
 
       send(client_pid, :stop)
-      assert_receive {:operation, {:client_leave, ^client_id}}
+      assert_receive {:operations, [{:client_leave, ^client_id}]}
       refute render(view) =~ "Jake Peralta"
     end
 
@@ -1711,8 +1768,8 @@ defmodule LivebookWeb.SessionLiveTest do
 
       assert render(view) =~ "Jake Peralta"
 
-      Users.broadcast_change(%{user1 | name: "Raymond Holt"})
-      assert_receive {:operation, {:update_user, _client_id, _user}}
+      Livebook.Users.broadcast_change(%{user1 | name: "Raymond Holt"})
+      assert_receive {:operations, [{:update_user, _client_id, _user}]}
 
       refute render(view) =~ "Jake Peralta"
       assert render(view) =~ "Raymond Holt"
@@ -2000,10 +2057,8 @@ defmodule LivebookWeb.SessionLiveTest do
     test "lists search entries", %{conn: conn, session: session} do
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}/package-search")
 
-      [search_view] = live_children(view)
-
       # Search the predefined dependencies in the embedded runtime
-      search_view
+      view
       |> element(~s{form[phx-change="search"]})
       |> render_change(%{"search" => "re"})
 
@@ -2101,8 +2156,7 @@ defmodule LivebookWeb.SessionLiveTest do
       code = ~s{System.fetch_env!("LB_#{secret.name}")}
       cell_id = insert_text_cell(session.pid, section_id, :code, code)
 
-      Session.queue_cell_evaluation(session.pid, cell_id)
-      assert_receive {:operation, {:add_cell_evaluation_response, _, ^cell_id, _, _}}
+      evaluate_cell(session.pid, cell_id)
 
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
 
@@ -2122,8 +2176,7 @@ defmodule LivebookWeb.SessionLiveTest do
       code = ~s{System.fetch_env!("LB_#{secret.name}")}
       cell_id = insert_text_cell(session.pid, section_id, :code, code)
 
-      Session.queue_cell_evaluation(session.pid, cell_id)
-      assert_receive {:operation, {:add_cell_evaluation_response, _, ^cell_id, _, _}}
+      evaluate_cell(session.pid, cell_id)
 
       # Enters the session to check if the button exists
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
@@ -2147,8 +2200,10 @@ defmodule LivebookWeb.SessionLiveTest do
       assert_session_secret(view, session.pid, secret)
       Session.queue_cell_evaluation(session.pid, cell_id)
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id, terminal_text(output), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id, terminal_text(output), _}
+                      ]}
 
       assert output == "\e[32m\"#{secret.value}\"\e[0m"
     end
@@ -2164,8 +2219,7 @@ defmodule LivebookWeb.SessionLiveTest do
       code = ~s{System.fetch_env!("LB_#{secret.name}")}
       cell_id = insert_text_cell(session.pid, section_id, :code, code)
 
-      Session.queue_cell_evaluation(session.pid, cell_id)
-      assert_receive {:operation, {:add_cell_evaluation_response, _, ^cell_id, _, _}}
+      evaluate_cell(session.pid, cell_id)
 
       # Enters the session to check if the button exists
       {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
@@ -2193,8 +2247,10 @@ defmodule LivebookWeb.SessionLiveTest do
       assert_session_secret(view, session.pid, secret)
       Session.queue_cell_evaluation(session.pid, cell_id)
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id, terminal_text(output), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id, terminal_text(output), _}
+                      ]}
 
       assert output == "\e[32m\"#{secret.value}\"\e[0m"
     end
@@ -2226,7 +2282,7 @@ defmodule LivebookWeb.SessionLiveTest do
       %{name: secret_name, value: secret_value} = insert_secret()
 
       # receives the operation event
-      assert_receive {:operation, {:sync_hub_secrets, "__server__"}}
+      assert_receive {:operations, [{:sync_hub_secrets, "__server__"}]}
 
       # selects the notebook's hub with team hub id
       Session.set_notebook_hub(session.pid, hub.id)
@@ -2256,7 +2312,7 @@ defmodule LivebookWeb.SessionLiveTest do
       render_submit(form, attrs)
 
       # receives the operation event
-      assert_receive {:operation, {:sync_hub_secrets, "__server__"}}
+      assert_receive {:operations, [{:sync_hub_secrets, "__server__"}]}
 
       # validates the secret
       secrets = Livebook.Hubs.get_secrets(hub)
@@ -2283,9 +2339,11 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{[data-el-session]})
       |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id,
-                       terminal_text("\e[35mnil\e[0m"), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id,
+                         terminal_text("\e[35mnil\e[0m"), _}
+                      ]}
 
       attrs = params_for(:env_var, name: name, value: "MyEnvVarValue")
       Settings.set_env_var(attrs)
@@ -2294,9 +2352,11 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{[data-el-session]})
       |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id,
-                       terminal_text("\e[32m\"MyEnvVarValue\"\e[0m"), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id,
+                         terminal_text("\e[32m\"MyEnvVarValue\"\e[0m"), _}
+                      ]}
 
       Settings.set_env_var(%{attrs | value: "OTHER_VALUE"})
 
@@ -2304,9 +2364,11 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{[data-el-session]})
       |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id,
-                       terminal_text("\e[32m\"OTHER_VALUE\"\e[0m"), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id,
+                         terminal_text("\e[32m\"OTHER_VALUE\"\e[0m"), _}
+                      ]}
 
       Settings.unset_env_var(name)
 
@@ -2314,9 +2376,11 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{[data-el-session]})
       |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id,
-                       terminal_text("\e[35mnil\e[0m"), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id,
+                         terminal_text("\e[35mnil\e[0m"), _}
+                      ]}
     end
 
     @tag :tmp_dir
@@ -2347,16 +2411,22 @@ defmodule LivebookWeb.SessionLiveTest do
 
       section_id = insert_section(session.pid)
 
-      cell_id = insert_text_cell(session.pid, section_id, :code, ~s{System.get_env("PATH")})
+      # Note that we use IO.write, to make sure the value is not truncated
+      # (which inspect does)
+      cell_id =
+        insert_text_cell(session.pid, section_id, :code, ~s{IO.write(System.get_env("PATH"))})
 
       view
       |> element(~s{[data-el-session]})
       |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id, terminal_text(output), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_output, _, ^cell_id, terminal_text(output, true)}
+                      ]}
 
-      assert output == "\e[32m\"#{String.replace(expected_path, "\\", "\\\\")}\"\e[0m"
+      assert output == expected_path
+      # assert output == "\e[32m\"#{String.replace(expected_path, "\\", "\\\\")}\"\e[0m"
 
       Settings.unset_env_var("PATH")
 
@@ -2364,10 +2434,12 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{[data-el-session]})
       |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id, terminal_text(output), _}}
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_output, _, ^cell_id, terminal_text(output, true)}
+                      ]}
 
-      assert output == "\e[32m\"#{String.replace(initial_os_path, "\\", "\\\\")}\"\e[0m"
+      assert output == initial_os_path
     end
   end
 
@@ -2396,7 +2468,7 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{#add-file-entry-form})
       |> render_submit(%{"data" => %{"name" => "image.jpg", "copy" => "true"}})
 
-      assert_receive {:operation, {:add_file_entries, _client_id, [%{name: "image.jpg"}]}}
+      assert_receive {:operations, [{:add_file_entries, _client_id, [%{name: "image.jpg"}]}]}
 
       assert %{notebook: %{file_entries: [%{type: :attachment, name: "image.jpg"}]}} =
                Session.get_data(session.pid)
@@ -2463,7 +2535,7 @@ defmodule LivebookWeb.SessionLiveTest do
         "data" => %{"name" => "image.jpg", "copy" => "true", "url" => file_url}
       })
 
-      assert_receive {:operation, {:add_file_entries, _client_id, [%{name: "image.jpg"}]}}
+      assert_receive {:operations, [{:add_file_entries, _client_id, [%{name: "image.jpg"}]}]}
 
       assert %{notebook: %{file_entries: [%{type: :attachment, name: "image.jpg"}]}} =
                Session.get_data(session.pid)
@@ -2518,7 +2590,7 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s{#add-file-entry-form})
       |> render_submit(%{"data" => %{"name" => "image.jpg"}})
 
-      assert_receive {:operation, {:add_file_entries, _client_id, [%{name: "image.jpg"}]}}
+      assert_receive {:operations, [{:add_file_entries, _client_id, [%{name: "image.jpg"}]}]}
 
       assert %{notebook: %{file_entries: [%{type: :attachment, name: "image.jpg"}]}} =
                Session.get_data(session.pid)
@@ -2646,8 +2718,10 @@ defmodule LivebookWeb.SessionLiveTest do
       |> element(~s/[data-el-files-list] menu button/, "Move to attachments")
       |> render_click()
 
-      assert_receive {:operation,
-                      {:add_file_entries, _client_id, [%{type: :attachment, name: "image.jpg"}]}}
+      assert_receive {:operations,
+                      [
+                        {:add_file_entries, _client_id, [%{type: :attachment, name: "image.jpg"}]}
+                      ]}
 
       assert %{notebook: %{file_entries: [%{type: :attachment, name: "image.jpg"}]}} =
                Session.get_data(session.pid)
@@ -2685,7 +2759,7 @@ defmodule LivebookWeb.SessionLiveTest do
 
       render_confirm(view)
 
-      assert_receive {:operation, {:allow_file_entry, _client_id, "document.pdf"}}
+      assert_receive {:operations, [{:allow_file_entry, _client_id, "document.pdf"}]}
 
       refute view
              |> element(~s/[data-el-files-list]/)
@@ -2702,11 +2776,9 @@ defmodule LivebookWeb.SessionLiveTest do
 
       section_id = insert_section(session.pid)
 
-      insert_cell_with_output(
-        session.pid,
-        section_id,
-        terminal_text("Hello from the app!")
-      )
+      insert_text_cell(session.pid, section_id, :code, """
+      IO.puts("Hello from the app!")
+      """)
 
       slug = Livebook.Utils.random_short_id()
 
@@ -2715,6 +2787,9 @@ defmodule LivebookWeb.SessionLiveTest do
       view
       |> element(~s/[data-el-app-info] a/, "Configure")
       |> render_click()
+
+      # doesn't show the app folder select
+      refute has_element?(view, ~s/#app-settings-modal input[name="app_folder_id"]/)
 
       view
       |> element(~s/#app-settings-modal form/)
@@ -2730,7 +2805,7 @@ defmodule LivebookWeb.SessionLiveTest do
 
       assert_receive {:app_created, %{slug: ^slug} = app}
 
-      assert_receive {:operation, {:set_deployed_app_slug, _client_id, ^slug}}
+      assert_receive {:operations, [{:set_deployed_app_slug, _client_id, ^slug}]}
 
       assert render(view) =~ "/apps/#{slug}"
 
@@ -2866,7 +2941,7 @@ defmodule LivebookWeb.SessionLiveTest do
       ''')
 
     Session.queue_cell_evaluation(session.pid, cell_id)
-    assert_receive {:operation, {:add_cell_evaluation_response, _, ^cell_id, _, _}}
+    assert_receive {:operations, [{:add_cell_evaluation_response, _, ^cell_id, _, _}]}
 
     assert has_element?(
              view,
@@ -2881,5 +2956,36 @@ defmodule LivebookWeb.SessionLiveTest do
            )
   after
     Code.put_compiler_option(:debug_info, false)
+  end
+
+  @tag :python
+  test "python code evaluation end-to-end", %{conn: conn, session: session} do
+    # Use the standalone runtime, to install Pythonx and setup the interpreter
+    Session.set_runtime(session.pid, Runtime.Standalone.new())
+
+    {:ok, view, _} = live(conn, ~p"/sessions/#{session.id}")
+
+    Session.subscribe(session.id)
+
+    view
+    |> element("[data-el-language-buttons] button", "Python")
+    |> render_click()
+
+    section_id = insert_section(session.pid)
+
+    cell_id =
+      insert_text_cell(session.pid, section_id, :code, "len([1, 2])", %{language: :python})
+
+    view
+    |> element(~s{[data-el-session]})
+    |> render_hook("queue_cell_evaluation", %{"cell_id" => cell_id})
+
+    assert_receive {:operations,
+                    [
+                      {:add_cell_evaluation_response, _, ^cell_id, terminal_text(output), _}
+                    ]},
+                   40_000
+
+    assert output == "2"
   end
 end

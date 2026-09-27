@@ -3,7 +3,9 @@ defmodule LivebookWeb.OpenLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Livebook.{Sessions, Session, FileSystem}
+  alias Livebook.Sessions
+  alias Livebook.Session
+  alias Livebook.FileSystem
 
   describe "file selection" do
     test "does not mention autosaving if disabled", %{conn: conn} do
@@ -21,7 +23,7 @@ defmodule LivebookWeb.OpenLiveTest do
       |> render_change(%{path: path})
 
       # Render the view separately to make sure it received the :set_file event
-      render(view) =~ "livebook_web"
+      assert render(view) =~ "livebook_web"
     end
 
     test "allows importing when a notebook file is selected", %{conn: conn} do
@@ -97,7 +99,9 @@ defmodule LivebookWeb.OpenLiveTest do
              |> has_element?()
 
       assert view
-             |> element(~s{[data-tooltip="This file is write-protected, please fork instead"]})
+             |> element(
+               ~s{[data-tooltip="This file is write-protected, fork to create an editable copy"]}
+             )
              |> has_element?()
     end
   end

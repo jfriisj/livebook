@@ -56,8 +56,8 @@ import { initializeIframeSource } from "./js_view/iframe";
  *
  *   * `iframe-url` - an optional location to load the iframe from
  *
- *   * `timeout-message` - the message to show when the initial
- *     data does not load
+ *   * `unreachable-message` - the message to show when the initial
+ *     data fails to load
  *
  */
 const JSView = {
@@ -71,8 +71,6 @@ const JSView = {
     this.initReceived = false;
     this.syncCallbackQueue = [];
     this.pongCallbackQueue = [];
-
-    this.initTimeout = setTimeout(() => this.handleInitTimeout(), 2_000);
 
     this.channel = getChannel(this.props.sessionToken);
 
@@ -102,8 +100,13 @@ const JSView = {
     const initRef = this.channel.on(
       `init:${this.props.ref}:${this.id}`,
       (raw) => {
-        const [, payload] = transportDecode(raw);
-        this.handleServerInit(payload);
+        const [[ok], payload] = transportDecode(raw);
+        this.removeSkeleton();
+        if (ok) {
+          this.handleServerInit(payload);
+        } else {
+          this.handleInitUnreachable();
+        }
       },
     );
 
@@ -115,7 +118,10 @@ const JSView = {
     const errorRef = this.channel.on(
       `error:${this.props.ref}`,
       ({ message, init }) => {
-        this.handleServerError(message, init);
+        if (init) {
+          this.removeSkeleton();
+        }
+        this.handleServerError(message);
       },
     );
 
@@ -187,7 +193,7 @@ const JSView = {
       "connect-token",
       "iframe-port",
       "iframe-url",
-      "timeout-message",
+      "unreachable-message",
     ]);
   },
 
@@ -212,12 +218,14 @@ const JSView = {
     this.el.appendChild(this.iframePlaceholder);
 
     this.iframe = document.createElement("iframe");
-    this.iframe.className = "w-full h-0 absolute z-[1]";
+    this.iframe.className = "w-full h-0 absolute z-1";
 
     const notebookEl = document.querySelector(`[data-el-notebook]`);
     const notebookContentEl = notebookEl.querySelector(
       `[data-el-notebook-content]`,
     );
+
+    const outputsContainerEl = this.el.closest(`[data-el-outputs-container]`);
 
     // Most placeholder position changes are accompanied by changes
     // to the notebook content element height (adding cells, inserting
@@ -231,6 +239,10 @@ const JSView = {
     });
     resizeObserver.observe(notebookContentEl);
     resizeObserver.observe(notebookEl);
+
+    // We also observe the outputs container, since the outputs width is
+    // configurable and can change dynamically.
+    if (outputsContainerEl) resizeObserver.observe(outputsContainerEl);
 
     // The placeholder may be hidden, in which case we want to hide
     // the iframe as well. This could be the case when viewing the
@@ -416,23 +428,14 @@ const JSView = {
     }
   },
 
-  handleInitTimeout() {
-    this.initTimeoutContainer = document.createElement("div");
-    this.initTimeoutContainer.classList.add("info-box");
-    this.el.prepend(this.initTimeoutContainer);
-    this.initTimeoutContainer.textContent = this.props.timeoutMessage;
-  },
-
-  clearInitTimeout() {
-    clearTimeout(this.initTimeout);
-
-    if (this.initTimeoutContainer) {
-      this.initTimeoutContainer.remove();
-    }
+  handleInitUnreachable() {
+    const container = document.createElement("div");
+    container.classList.add("info-box");
+    this.el.prepend(container);
+    container.textContent = this.props.unreachableMessage;
   },
 
   handleServerInit(payload) {
-    this.clearInitTimeout();
     this.initReceived = true;
 
     this.childReadyPromise.then(() => {
@@ -450,11 +453,7 @@ const JSView = {
     });
   },
 
-  handleServerError(message, init) {
-    if (init) {
-      this.clearInitTimeout();
-    }
-
+  handleServerError(message) {
     if (!this.errorContainer) {
       this.errorContainer = document.createElement("div");
       this.errorContainer.classList.add("error-box", "mb-4");
@@ -496,6 +495,11 @@ const JSView = {
       "data-js-focused",
       parentFocusableId === focusableId,
     );
+  },
+
+  removeSkeleton() {
+    const skeletonEl = this.el.querySelector(`[data-el-skeleton]`);
+    skeletonEl.remove();
   },
 };
 

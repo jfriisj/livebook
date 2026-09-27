@@ -53,26 +53,22 @@ defmodule Livebook.Runtime.K8sTest do
     pid = Runtime.K8s.new(config) |> Runtime.connect()
 
     assert_receive {:runtime_connect_info, ^pid, "create pod"}, @assert_receive_timeout
-
     assert_receive {:runtime_connect_info, ^pid, "waiting for pod"}, @assert_receive_timeout
 
-    assert_receive {:runtime_connect_info, ^pid, "created container livebook-runtime"},
-                   @assert_receive_timeout
-
-    assert_receive {:runtime_connect_info, ^pid, "started container livebook-runtime"},
-                   @assert_receive_timeout
+    assert_receive {:runtime_connect_info, ^pid, "container created"}, @assert_receive_timeout
+    assert_receive {:runtime_connect_info, ^pid, "container started"}, @assert_receive_timeout
 
     assert_receive {:runtime_connect_info, ^pid, "start proxy"}, @assert_receive_timeout
     assert_receive {:runtime_connect_info, ^pid, "connect to node"}, @assert_receive_timeout
     assert_receive {:runtime_connect_info, ^pid, "initialize node"}, @assert_receive_timeout
     assert_receive {:runtime_connect_done, ^pid, {:ok, runtime}}, @assert_receive_timeout
 
-    Runtime.take_ownership(runtime)
+    Runtime.take_ownership(runtime, [])
 
     assert [_] = list_pods()
 
     # Verify that we can actually evaluate code on the Kubernetes Pod
-    Runtime.evaluate_code(runtime, :elixir, ~s/System.fetch_env!("POD_NAME")/, {:c1, :e1}, [])
+    Runtime.evaluate_code(runtime, :elixir, ~s/System.fetch_env!("POD_NAME")/, {:c1, :e1}, [], [])
     assert_receive {:runtime_evaluation_response, :e1, %{type: :terminal_text, text: text}, _meta}
     assert text =~ runtime.pod_name
 

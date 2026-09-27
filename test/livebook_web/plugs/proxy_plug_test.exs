@@ -2,11 +2,11 @@ defmodule LivebookWeb.ProxyPlugTest do
   use LivebookWeb.ConnCase, async: true
 
   # Integration tests for proxying requests to the runtime.
-
-  require Phoenix.LiveViewTest
   import Livebook.AppHelpers
 
-  alias Livebook.{Notebook, Session, Sessions}
+  alias Livebook.Notebook
+  alias Livebook.Session
+  alias Livebook.Sessions
 
   describe "session" do
     test "returns error when session doesn't exist", %{conn: conn} do
@@ -32,8 +32,10 @@ defmodule LivebookWeb.ProxyPlugTest do
       Session.subscribe(session.id)
       Session.queue_cell_evaluation(session.pid, cell_id)
 
-      assert_receive {:operation,
-                      {:add_cell_evaluation_response, _, ^cell_id, _, %{errored: false}}},
+      assert_receive {:operations,
+                      [
+                        {:add_cell_evaluation_response, _, ^cell_id, _, %{errored: false}}
+                      ]},
                      4_000
 
       url = "/proxy/sessions/#{session.id}/"
@@ -43,6 +45,7 @@ defmodule LivebookWeb.ProxyPlugTest do
       assert text_response(put(conn, url), 200) == "used PUT method"
       assert text_response(patch(conn, url), 200) == "used PATCH method"
       assert text_response(delete(conn, url), 200) == "used DELETE method"
+      assert get_resp_header(get(conn, url), "x-request-path") == [url]
 
       Session.close(session.pid)
     end
@@ -78,11 +81,13 @@ defmodule LivebookWeb.ProxyPlugTest do
       assert text_response(put(conn, url), 200) == "used PUT method"
       assert text_response(patch(conn, url), 200) == "used PATCH method"
       assert text_response(delete(conn, url), 200) == "used DELETE method"
+      assert get_resp_header(get(conn, url), "x-request-path") == [url]
 
       # Generic path also works for single-session apps
       url = "/proxy/apps/#{slug}/"
 
       assert text_response(get(conn, url), 200) == "used GET method"
+      assert get_resp_header(get(conn, url), "x-request-path") == [url]
     end
 
     test "waits for the session to be executed before attempting the request", %{conn: conn} do
@@ -108,6 +113,7 @@ defmodule LivebookWeb.ProxyPlugTest do
       url = "/proxy/apps/#{slug}/"
 
       assert text_response(get(conn, url), 200) == "used GET method"
+      assert get_resp_header(get(conn, url), "x-request-path") == [url]
     end
 
     test "returns error when requesting generic path for multi-session app", %{conn: conn} do
@@ -138,22 +144,12 @@ defmodule LivebookWeb.ProxyPlugTest do
       %{
         Notebook.Cell.new(:code)
         | source: """
-          fun = fn conn ->
+          Kino.Proxy.listen(fn conn ->
             conn
+            |> Plug.Conn.put_resp_header("x-request-path", conn.request_path)
             |> Plug.Conn.put_resp_header("content-type", "application/text;charset=utf-8")
             |> Plug.Conn.send_resp(200, "used " <> conn.method <> " method")
-          end
-
-          ref = make_ref()
-          request = {:livebook_get_proxy_handler_child_spec, fun}
-          send(Process.group_leader(), {:io_request, self(), ref, request})
-
-          child_spec =
-            receive do
-              {:io_reply, ^ref, child_spec} -> child_spec
-            end
-
-          Supervisor.start_link([child_spec], strategy: :one_for_one)\
+          end)\
           """
       }
 

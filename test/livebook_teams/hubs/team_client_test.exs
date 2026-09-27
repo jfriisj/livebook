@@ -3,66 +3,90 @@ defmodule Livebook.Hubs.TeamClientTest do
 
   alias Livebook.Hubs.TeamClient
 
-  setup do
-    Livebook.Hubs.Broadcasts.subscribe([:connection, :file_systems, :secrets])
-    Livebook.Teams.Broadcasts.subscribe([:clients, :deployment_groups, :app_deployments, :agents])
+  setup :teams
 
-    :ok
-  end
+  @moduletag subscribe_to_hubs_topics: [:crud, :connection, :file_systems, :secrets]
+  @moduletag subscribe_to_teams_topics: [
+               :clients,
+               :deployment_groups,
+               :app_deployments,
+               :agents,
+               :app_folders
+             ]
 
   describe "connect" do
-    test "successfully authenticates the websocket connection", %{user: user, node: node} do
-      team = build_team_hub(user, node)
-      id = team.id
-      TeamClient.start_link(team)
+    @describetag teams_for: :user
+    @describetag teams_persisted: false
 
+    test "successfully authenticates the websocket connection", %{team: team} do
+      id = team.id
+
+      assert {:ok, _pid} = TeamClient.start_link(team)
       assert_receive {:hub_connected, ^id}
       assert_receive {:client_connected, ^id}
+
+      TeamClient.stop(id)
     end
 
     @tag capture_log: true
-    test "rejects the web socket connection with invalid credentials", %{user: user, token: token} do
-      team =
-        build(:team,
-          user_id: user.id,
-          org_id: 123_456,
-          org_key_id: 123_456,
-          session_token: token
-        )
-
+    test "rejects the web socket connection with invalid credentials", %{team: team} do
+      team = %{team | org_id: 123_456, org_key_id: 123_456}
       id = team.id
 
+      error =
+        "#{team.hub_name}: Your session is out-of-date. Please re-join the organization."
+
       start_supervised!({TeamClient, team})
+      assert_receive {:hub_server_error, ^id, ^error}
+    end
 
-      assert_receive {:hub_server_error, ^id, error}
+    test "handles service unavailable without deleting hub", %{team: team} do
+      id = team.id
+      reason = "Service temporarily unavailable. Please try again."
 
-      assert error ==
-               "#{team.hub_name}: Your session is out-of-date. Please re-join the organization."
+      assert {:ok, pid} = TeamClient.start_link(team)
+      assert_receive {:hub_connected, ^id}
+      assert_receive {:client_connected, ^id}
+
+      # Simulate receiving a service_unavailable message from the Connection process
+      send(pid, {:service_unavailable, reason})
+
+      # Should broadcast hub_connection_failed
+      assert_receive {:hub_connection_failed, ^id, ^reason}
+
+      # Hub should NOT be deleted (unlike server_error which deletes the hub)
+      refute_receive {:hub_deleted, ^id}
+
+      # TeamClient should still be running
+      assert Process.alive?(pid)
+
+      TeamClient.stop(id)
     end
   end
 
   describe "handle user_connected event" do
-    setup %{user: user, node: node} do
-      team = build_team_hub(user, node)
+    @describetag teams_for: :user
 
+    setup context do
       user_connected =
         %LivebookProto.UserConnected{
-          name: team.hub_name,
+          name: context.team.hub_name,
           secrets: [],
           file_systems: [],
           deployment_groups: [],
-          app_deployments: []
+          app_deployments: [],
+          notifications: [],
+          agents: [],
+          app_folders: []
         }
 
-      {:ok, team: team, user_connected: user_connected}
+      pid = TeamClient.get_pid(context.team.id)
+      {:ok, pid: pid, user_connected: user_connected}
     end
 
     test "receives the user events", %{team: team, node: node} do
-      Livebook.Hubs.Broadcasts.subscribe([:crud])
-      connect_to_teams(team)
-
       # force user to be deleted from org
-      erpc_call(node, :delete_user_org, [team.user_id, team.org_id])
+      TeamsRPC.delete_user_org(node, team.user_id, team.org_id)
 
       id = team.id
       reason = "#{team.hub_name}: you were removed from the org"
@@ -72,7 +96,7 @@ defmodule Livebook.Hubs.TeamClientTest do
       refute team in Livebook.Hubs.get_hubs()
     end
 
-    test "dispatches the secrets list", %{team: team, user_connected: user_connected} do
+    test "dispatches the secrets list", %{team: team, pid: pid, user_connected: user_connected} do
       secret =
         build(:secret,
           name: "CHONKY_CAT",
@@ -86,7 +110,6 @@ defmodule Livebook.Hubs.TeamClientTest do
 
       # creates the secret
       user_connected = %{user_connected | secrets: [livebook_proto_secret]}
-      pid = connect_to_teams(team)
       refute_received {:secret_created, ^secret}
       send(pid, {:event, :user_connected, user_connected})
       assert_receive {:secret_created, ^secret}
@@ -109,7 +132,8 @@ defmodule Livebook.Hubs.TeamClientTest do
       refute updated_secret in TeamClient.get_secrets(team.id)
     end
 
-    test "dispatches the file systems list", %{team: team, user_connected: user_connected} do
+    test "dispatches the file systems list",
+         %{team: team, pid: pid, user_connected: user_connected} do
       bucket_url = "https://mybucket.s3.amazonaws.com"
       hash = :crypto.hash(:sha256, bucket_url)
       fs_id = "#{team.id}-s3-#{Base.url_encode64(hash, padding: false)}"
@@ -135,7 +159,6 @@ defmodule Livebook.Hubs.TeamClientTest do
 
       # creates the file system
       user_connected = %{user_connected | file_systems: [livebook_proto_file_system]}
-      pid = connect_to_teams(team)
       refute_received {:file_system_created, ^file_system}
       send(pid, {:event, :user_connected, user_connected})
       assert_receive {:file_system_created, ^file_system}
@@ -171,7 +194,8 @@ defmodule Livebook.Hubs.TeamClientTest do
       refute updated_file_system in TeamClient.get_file_systems(team.id)
     end
 
-    test "dispatches the deployment groups list", %{team: team, user_connected: user_connected} do
+    test "dispatches the deployment groups list",
+         %{team: team, pid: pid, user_connected: user_connected} do
       deployment_group =
         build(:deployment_group,
           id: "1",
@@ -193,7 +217,6 @@ defmodule Livebook.Hubs.TeamClientTest do
 
       # creates the deployment group
       user_connected = %{user_connected | deployment_groups: [livebook_proto_deployment_group]}
-      pid = connect_to_teams(team)
       refute_received {:deployment_group_created, ^deployment_group}
       send(pid, {:event, :user_connected, user_connected})
       assert_receive {:deployment_group_created, ^deployment_group}
@@ -224,9 +247,9 @@ defmodule Livebook.Hubs.TeamClientTest do
       refute updated_deployment_group in TeamClient.get_deployment_groups(team.id)
     end
 
-    test "dispatches the app deployments list", %{team: team, user_connected: user_connected} do
+    test "dispatches the app deployments list",
+         %{team: team, pid: pid, user_connected: user_connected} do
       hub_id = team.id
-      pid = connect_to_teams(team)
 
       deployment_group =
         build(:deployment_group,
@@ -288,9 +311,32 @@ defmodule Livebook.Hubs.TeamClientTest do
       refute app_deployment in TeamClient.get_app_deployments(team.id)
     end
 
-    test "dispatches the agents list", %{team: team, user_connected: user_connected} do
-      pid = connect_to_teams(team)
-      agent = build(:agent, hub_id: team.id, org_id: to_string(team.org_id))
+    test "dispatches the agents list", %{team: team, pid: pid, user_connected: user_connected} do
+      deployment_group =
+        build(:deployment_group,
+          id: "1",
+          name: "sleepy-cat-#{System.unique_integer([:positive])}",
+          mode: :offline,
+          hub_id: team.id,
+          teams_auth: false
+        )
+
+      livebook_proto_deployment_group =
+        %LivebookProto.DeploymentGroup{
+          id: to_string(deployment_group.id),
+          name: deployment_group.name,
+          mode: to_string(deployment_group.mode),
+          secrets: [],
+          agent_keys: [],
+          teams_auth: deployment_group.teams_auth
+        }
+
+      agent =
+        build(:agent,
+          hub_id: team.id,
+          org_id: to_string(team.org_id),
+          deployment_group_id: to_string(deployment_group.id)
+        )
 
       livebook_proto_agent =
         %LivebookProto.Agent{
@@ -300,7 +346,11 @@ defmodule Livebook.Hubs.TeamClientTest do
           deployment_group_id: agent.deployment_group_id
         }
 
-      user_connected = %{user_connected | agents: [livebook_proto_agent]}
+      user_connected = %{
+        user_connected
+        | deployment_groups: [livebook_proto_deployment_group],
+          agents: [livebook_proto_agent]
+      }
 
       send(pid, {:event, :user_connected, user_connected})
       assert_receive {:agent_joined, ^agent}
@@ -312,34 +362,135 @@ defmodule Livebook.Hubs.TeamClientTest do
       assert_receive {:agent_left, ^agent}
       refute agent in TeamClient.get_agents(team.id)
     end
+
+    test "dispatches the app folders list",
+         %{team: team, pid: pid, user_connected: user_connected} do
+      app_folder = build(:app_folder, hub_id: team.id)
+
+      livebook_proto_app_folder =
+        %LivebookProto.AppFolder{
+          id: app_folder.id,
+          name: app_folder.name
+        }
+
+      # creates the app folder
+      user_connected = %{user_connected | app_folders: [livebook_proto_app_folder]}
+      refute_received {:app_folder_created, ^app_folder}
+      send(pid, {:event, :user_connected, user_connected})
+      assert_receive {:app_folder_created, ^app_folder}
+      assert app_folder in TeamClient.get_app_folders(team.id)
+
+      # updates the app folder
+      updated_app_folder = %{app_folder | name: "ChonkiestCat"}
+
+      updated_livebook_proto_app_folder = %{
+        livebook_proto_app_folder
+        | name: updated_app_folder.name
+      }
+
+      user_connected = %{user_connected | app_folders: [updated_livebook_proto_app_folder]}
+      send(pid, {:event, :user_connected, user_connected})
+      assert_receive {:app_folder_updated, ^updated_app_folder}
+      refute app_folder in TeamClient.get_app_folders(team.id)
+      assert updated_app_folder in TeamClient.get_app_folders(team.id)
+
+      # deletes the app folder
+      user_connected = %{user_connected | app_folders: []}
+      send(pid, {:event, :user_connected, user_connected})
+      assert_receive {:app_folder_deleted, ^updated_app_folder}
+      refute updated_app_folder in TeamClient.get_app_folders(team.id)
+    end
+
+    test "dispatches the notifications list",
+         %{team: team, pid: pid, user_connected: user_connected} do
+      notification = build(:notification)
+
+      livebook_proto_notification =
+        %LivebookProto.Notification{
+          id: notification.id,
+          kind: notification.kind,
+          message: to_string(notification.message)
+        }
+
+      # appends the notification
+      user_connected = %{user_connected | notifications: [livebook_proto_notification]}
+      refute_received {:notification_sent, ^notification}
+      send(pid, {:event, :user_connected, user_connected})
+      assert_receive {:notification_sent, ^notification}
+      assert notification in TeamClient.get_notifications(team.id)
+
+      # updates the notification
+      updated_notification = %{notification | message: "Update to 0.19.0"}
+
+      updated_livebook_proto_notification = %{
+        livebook_proto_notification
+        | message: updated_notification.message
+      }
+
+      user_connected = %{user_connected | notifications: [updated_livebook_proto_notification]}
+      send(pid, {:event, :user_connected, user_connected})
+      assert_receive {:notification_updated, ^updated_notification}
+      refute notification in TeamClient.get_notifications(team.id)
+      assert updated_notification in TeamClient.get_notifications(team.id)
+
+      # deletes the notification
+      user_connected = %{user_connected | notifications: []}
+      send(pid, {:event, :user_connected, user_connected})
+      assert_receive {:notification_deleted, ^updated_notification}
+      refute notification in TeamClient.get_notifications(team.id)
+    end
   end
 
   describe "handle agent_connected event" do
-    setup %{node: node} do
-      {agent_key, org, deployment_group, team} = build_agent_team_hub(node)
-      org_key_pair = erpc_call(node, :create_org_key_pair, [[org: org]])
+    @describetag teams_for: :agent
 
+    setup context do
       agent_connected =
         %LivebookProto.AgentConnected{
-          name: Livebook.Config.agent_name(),
-          public_key: org_key_pair.public_key,
-          deployment_group_id: deployment_group.id,
+          name: get_in(context, [:agent, Access.key!(:name)]),
+          public_key: context.org_key_pair.public_key,
+          deployment_group_id: to_string(context.deployment_group.id),
           secrets: [],
           file_systems: [],
-          deployment_groups: [],
+          deployment_groups: [
+            %LivebookProto.DeploymentGroup{
+              id: to_string(context.deployment_group.id),
+              name: context.deployment_group.name,
+              mode: to_string(context.deployment_group.mode),
+              clustering: to_string(context.deployment_group.clustering),
+              url: to_string(context.deployment_group.url),
+              deployed_apps_counter: 0,
+              # deprecated
+              zta_provider: "",
+              # deprecated
+              zta_key: "",
+              teams_auth: context.deployment_group.teams_auth,
+              deploy_auth: context.deployment_group.deploy_auth,
+              groups_auth: context.deployment_group.groups_auth,
+              agent_keys: [
+                %LivebookProto.AgentKey{
+                  id: to_string(context.agent_key.id),
+                  key: context.agent_key.key,
+                  deployment_group_id: to_string(context.agent_key.deployment_group_id)
+                }
+              ],
+              secrets: [],
+              environment_variables: [],
+              authorization_groups: [],
+              deployment_users: []
+            }
+          ],
           app_deployments: [],
-          agents: []
+          notifications: [],
+          agents: [],
+          app_folders: []
         }
 
-      {:ok,
-       team: team,
-       org: org,
-       deployment_group: deployment_group,
-       agent_connected: agent_connected,
-       agent_key: agent_key}
+      pid = TeamClient.get_pid(context.team.id)
+      {:ok, pid: pid, agent_connected: agent_connected}
     end
 
-    test "dispatches the secrets list", %{team: team, agent_connected: agent_connected} do
+    test "dispatches the secrets list", %{team: team, pid: pid, agent_connected: agent_connected} do
       secret =
         build(:secret,
           name: "AGENT_SECRET",
@@ -353,7 +504,6 @@ defmodule Livebook.Hubs.TeamClientTest do
 
       # creates the secret
       agent_connected = %{agent_connected | secrets: [livebook_proto_secret]}
-      pid = connect_to_teams(team)
       refute_received {:secret_created, ^secret}
       send(pid, {:event, :agent_connected, agent_connected})
       assert_receive {:secret_created, ^secret}
@@ -376,7 +526,8 @@ defmodule Livebook.Hubs.TeamClientTest do
       refute updated_secret in TeamClient.get_secrets(team.id)
     end
 
-    test "dispatches the file systems list", %{team: team, agent_connected: agent_connected} do
+    test "dispatches the file systems list",
+         %{team: team, pid: pid, agent_connected: agent_connected} do
       bucket_url = "https://mybucket.s3.amazonaws.com"
       hash = :crypto.hash(:sha256, bucket_url)
       fs_id = "#{team.id}-s3-#{Base.url_encode64(hash, padding: false)}"
@@ -402,7 +553,6 @@ defmodule Livebook.Hubs.TeamClientTest do
 
       # creates the file system
       agent_connected = %{agent_connected | file_systems: [livebook_proto_file_system]}
-      pid = connect_to_teams(team)
       refute_received {:file_system_created, ^file_system}
       send(pid, {:event, :agent_connected, agent_connected})
       assert_receive {:file_system_created, ^file_system}
@@ -438,113 +588,55 @@ defmodule Livebook.Hubs.TeamClientTest do
       refute updated_file_system in TeamClient.get_file_systems(team.id)
     end
 
-    test "dispatches the deployment groups list",
-         %{
-           team: team,
-           deployment_group: teams_deployment_group,
-           agent_key: teams_agent_key,
-           agent_connected: agent_connected
-         } do
-      agent_key =
-        build(:agent_key,
-          id: to_string(teams_agent_key.id),
-          key: teams_agent_key.key,
-          deployment_group_id: to_string(teams_agent_key.deployment_group_id)
-        )
-
-      deployment_group =
-        build(:deployment_group,
-          id: to_string(teams_deployment_group.id),
-          name: teams_deployment_group.name,
-          mode: teams_deployment_group.mode,
-          hub_id: team.id,
-          agent_keys: [agent_key]
-        )
-
-      livebook_proto_agent_key =
-        %LivebookProto.AgentKey{
-          id: agent_key.id,
-          key: agent_key.key,
-          deployment_group_id: agent_key.deployment_group_id
-        }
-
-      livebook_proto_deployment_group =
-        %LivebookProto.DeploymentGroup{
-          id: to_string(deployment_group.id),
-          name: deployment_group.name,
-          mode: to_string(deployment_group.mode),
-          agent_keys: [livebook_proto_agent_key],
-          teams_auth: deployment_group.teams_auth,
-          secrets: [],
-          environment_variables: []
-        }
+    test "dispatches the deployment groups list", %{agent_connected: agent_connected} = ctx do
+      id = to_string(ctx.deployment_group.id)
+      name = "A WHOLE NEW NAME"
 
       # creates the deployment group
-      agent_connected = %{agent_connected | deployment_groups: [livebook_proto_deployment_group]}
-      pid = connect_to_teams(team)
-      send(pid, {:event, :agent_connected, agent_connected})
-      assert_receive {:deployment_group_created, ^deployment_group}
-      assert deployment_group in TeamClient.get_deployment_groups(team.id)
+      send(ctx.pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:deployment_group_created, %{id: ^id} = deployment_group}
+      assert deployment_group in TeamClient.get_deployment_groups(ctx.team.id)
 
       # updates the deployment group
-      updated_livebook_proto_deployment_group = %{
-        livebook_proto_deployment_group
-        | name: "A WHOLE NEW NAME"
-      }
+      livebook_proto_deployment_group =
+        agent_connected.deployment_groups
+        |> List.first()
+        |> put_in([Access.key!(:name)], name)
 
-      agent_connected = %{
-        agent_connected
-        | deployment_groups: [updated_livebook_proto_deployment_group]
-      }
+      agent_connected = %{agent_connected | deployment_groups: [livebook_proto_deployment_group]}
+      send(ctx.pid, {:event, :agent_connected, agent_connected})
 
-      send(pid, {:event, :agent_connected, agent_connected})
-      assert_receive {:deployment_group_updated, %{name: "A WHOLE NEW NAME"}}
-      refute deployment_group in TeamClient.get_deployment_groups(team.id)
+      assert_receive {:deployment_group_updated,
+                      %{id: ^id, name: ^name} = updated_deployment_group}
 
-      assert Enum.find(
-               TeamClient.get_deployment_groups(team.id),
-               &(&1.name == "A WHOLE NEW NAME")
-             )
+      refute deployment_group in TeamClient.get_deployment_groups(ctx.team.id)
+      assert updated_deployment_group in TeamClient.get_deployment_groups(ctx.team.id)
 
       # deletes the deployment group
       agent_connected = %{agent_connected | deployment_groups: []}
-      send(pid, {:event, :agent_connected, agent_connected})
-      assert_receive {:deployment_group_deleted, %{name: "A WHOLE NEW NAME"}}
-
-      refute Enum.find(
-               TeamClient.get_deployment_groups(team.id),
-               &(&1.name == "A WHOLE NEW NAME")
-             )
+      send(ctx.pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:deployment_group_deleted, ^updated_deployment_group}
+      refute updated_deployment_group in TeamClient.get_deployment_groups(ctx.team.id)
     end
 
     test "dispatches the secrets list and override with deployment group secret",
-         %{team: team, deployment_group: teams_deployment_group, agent_connected: agent_connected} do
-      secret =
-        build(:secret,
-          name: "ORG_SECRET",
-          value: "an encrypted value",
-          hub_id: team.id
-        )
+         %{agent_connected: agent_connected} = ctx do
+      secret = build(:secret, name: "ORG_SECRET", hub_id: ctx.team.id)
+      id = to_string(ctx.deployment_group.id)
 
-      secret_key = Livebook.Teams.derive_key(team.teams_key)
+      secret_key = Livebook.Teams.derive_key(ctx.team.teams_key)
       secret_value = Livebook.Teams.encrypt(secret.value, secret_key)
       livebook_proto_secret = %LivebookProto.Secret{name: secret.name, value: secret_value}
 
       # creates the secret
       agent_connected = %{agent_connected | secrets: [livebook_proto_secret]}
-      pid = connect_to_teams(team)
       refute_received {:secret_created, ^secret}
-      send(pid, {:event, :agent_connected, agent_connected})
+      send(ctx.pid, {:event, :agent_connected, agent_connected})
       assert_receive {:secret_created, ^secret}
-      assert secret in TeamClient.get_secrets(team.id)
+      assert secret in TeamClient.get_secrets(ctx.team.id)
 
       # overrides the secret with deployment group secret
-      override_secret = %{
-        secret
-        | value: "an updated value",
-          deployment_group_id: teams_deployment_group.id
-      }
-
+      override_secret = %{secret | value: "an updated value", deployment_group_id: id}
       secret_value = Livebook.Teams.encrypt(override_secret.value, secret_key)
 
       livebook_proto_deployment_group_secret =
@@ -554,115 +646,97 @@ defmodule Livebook.Hubs.TeamClientTest do
           deployment_group_id: override_secret.deployment_group_id
         }
 
-      deployment_group =
-        build(:deployment_group,
-          id: to_string(teams_deployment_group.id),
-          name: teams_deployment_group.name,
-          mode: teams_deployment_group.mode,
-          hub_id: team.id,
-          secrets: [override_secret]
-        )
-
       livebook_proto_deployment_group =
-        %LivebookProto.DeploymentGroup{
-          id: to_string(deployment_group.id),
-          name: deployment_group.name,
-          mode: to_string(deployment_group.mode),
-          secrets: [livebook_proto_deployment_group_secret],
-          teams_auth: deployment_group.teams_auth
-        }
+        agent_connected.deployment_groups
+        |> List.first()
+        |> put_in([Access.key!(:secrets)], [livebook_proto_deployment_group_secret])
 
       agent_connected = %{agent_connected | deployment_groups: [livebook_proto_deployment_group]}
-      send(pid, {:event, :agent_connected, agent_connected})
-      assert_receive {:deployment_group_created, ^deployment_group}
-      refute secret in TeamClient.get_secrets(team.id)
-      assert override_secret in TeamClient.get_secrets(team.id)
+      send(ctx.pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:deployment_group_updated, %{id: ^id, secrets: [^override_secret]}}
+      refute secret in TeamClient.get_secrets(ctx.team.id)
+      assert override_secret in TeamClient.get_secrets(ctx.team.id)
     end
 
     @tag :tmp_dir
-    test "dispatches the app deployments list",
-         %{
-           team: team,
-           org: teams_org,
-           deployment_group: teams_deployment_group,
-           agent_key: teams_agent_key,
-           agent_connected: agent_connected,
-           tmp_dir: tmp_dir,
-           node: node
-         } do
-      agent_key =
-        build(:agent_key,
-          id: to_string(teams_agent_key.id),
-          key: teams_agent_key.key,
-          deployment_group_id: to_string(teams_agent_key.deployment_group_id)
-        )
-
-      deployment_group =
-        build(:deployment_group,
-          id: to_string(teams_deployment_group.id),
-          name: teams_deployment_group.name,
-          mode: teams_deployment_group.mode,
-          hub_id: team.id,
-          agent_keys: [agent_key]
-        )
-
-      livebook_proto_agent_key =
-        %LivebookProto.AgentKey{
-          id: agent_key.id,
-          key: agent_key.key,
-          deployment_group_id: agent_key.deployment_group_id
-        }
-
-      livebook_proto_deployment_group =
-        %LivebookProto.DeploymentGroup{
-          id: to_string(deployment_group.id),
-          name: deployment_group.name,
-          mode: to_string(deployment_group.mode),
-          secrets: [],
-          agent_keys: [livebook_proto_agent_key],
-          teams_auth: deployment_group.teams_auth
-        }
-
-      agent_connected = %{agent_connected | deployment_groups: [livebook_proto_deployment_group]}
-
-      pid = connect_to_teams(team)
-
-      # Since we're connecting as Agent, we should receive the
-      # `:deployment_group_created` event from `:agent_connected` event
-      assert_receive {:deployment_group_created, ^deployment_group}
-      assert deployment_group in TeamClient.get_deployment_groups(team.id)
-
+    @tag teams_persisted: false
+    test "dispatches the app deployments list", %{agent_connected: agent_connected} = ctx do
       # creates a new app deployment
-      deployment_group_id = to_string(deployment_group.id)
+      deployment_group_id = to_string(ctx.deployment_group.id)
       slug = Livebook.Utils.random_short_id()
       title = "MyNotebook2-#{slug}"
+      hub_id = ctx.team.id
 
       notebook = %{
         Livebook.Notebook.new()
         | app_settings: %{Livebook.Notebook.AppSettings.new() | slug: slug},
           file_entries: [%{type: :attachment, name: "image.jpg"}],
           name: title,
-          hub_id: team.id,
+          hub_id: hub_id,
           deployment_group_id: deployment_group_id
       }
 
-      files_dir = Livebook.FileSystem.File.local(tmp_dir)
+      files_dir = Livebook.FileSystem.File.local(ctx.tmp_dir)
       image_file = Livebook.FileSystem.File.resolve(files_dir, "image.jpg")
       :ok = Livebook.FileSystem.File.write(image_file, "content")
+
+      # since the app deployment must be exported to .livemd
+      # it will call Teams to stamp the notebook, which
+      # requires an user session
+      user = TeamsRPC.create_user(ctx.node)
+      session_token = TeamsRPC.associate_user_with_org(ctx.node, user, ctx.org)
+      org_id = to_string(ctx.org.id)
+      team_user = %{ctx.team | user_id: user.id, session_token: session_token}
+      Livebook.Hubs.save_hub(team_user)
+
+      # check if it connected as User
+      assert_receive {:hub_connected, ^hub_id}
+      assert_receive {:client_connected, ^hub_id}
+
+      refute_receive {:agent_joined,
+                      %{
+                        hub_id: ^hub_id,
+                        deployment_group_id: ^deployment_group_id,
+                        org_id: ^org_id
+                      }}
+
+      # get the pid for user session, so we can guarantee the hub is deleted later
+      pid = TeamClient.get_pid(hub_id)
 
       {:ok, %Livebook.Teams.AppDeployment{file: zip_content} = app_deployment} =
         Livebook.Teams.AppDeployment.new(notebook, files_dir)
 
-      secret_key = Livebook.Teams.derive_key(team.teams_key)
+      # now we change to agent session
+      TeamClient.stop(hub_id)
+      refute Process.alive?(pid)
+
+      Livebook.Hubs.save_hub(ctx.team)
+      pid = TeamClient.get_pid(hub_id)
+
+      # check if it connected again as Agent
+      assert Process.alive?(pid)
+      assert_receive {:hub_connected, ^hub_id}, 3_000
+      assert_receive {:client_connected, ^hub_id}, 3_000
+
+      assert_receive {:agent_joined,
+                      %{
+                        hub_id: ^hub_id,
+                        deployment_group_id: ^deployment_group_id,
+                        org_id: ^org_id
+                      }},
+                     3_000
+
+      secret_key = Livebook.Teams.derive_key(ctx.team.teams_key)
       encrypted_content = Livebook.Teams.encrypt(zip_content, secret_key)
 
       teams_app_deployment =
-        erpc_call(node, :upload_app_deployment, [
-          teams_org,
-          teams_deployment_group,
+        TeamsRPC.upload_app_deployment(
+          ctx.node,
+          ctx.org,
+          ctx.deployment_group,
           app_deployment,
           encrypted_content
-        ])
+        )
 
       # Since the app deployment struct generation is from Livebook side,
       # we don't have yet the information about who deployed the app,
@@ -690,28 +764,27 @@ defmodule Livebook.Hubs.TeamClientTest do
           revision_id: to_string(teams_app_deployment.app_revision.id),
           deployment_group_id: app_deployment.deployment_group_id,
           multi_session: app_deployment.multi_session,
-          access_type: to_string(app_deployment.access_type)
+          access_type: to_string(app_deployment.access_type),
+          authorization_groups: []
         }
 
       agent_connected = %{agent_connected | app_deployments: [livebook_proto_app_deployment]}
 
       Livebook.Apps.subscribe()
-      Livebook.Apps.Manager.subscribe()
-      erpc_call(node, :subscribe, [self(), teams_deployment_group, teams_org])
 
-      assert erpc_call(node, :get_apps_metadatas, [deployment_group_id]) == %{}
+      TeamsRPC.subscribe(ctx.node, self(), ctx.deployment_group, ctx.org)
+      assert TeamsRPC.get_apps_metadatas(ctx.node, deployment_group_id) == %{}
 
       send(pid, {:event, :agent_connected, agent_connected})
       assert_receive {:app_deployment_started, ^app_deployment}
 
-      [app_spec] = Livebook.Hubs.Provider.get_app_specs(team)
+      [app_spec] = Livebook.Hubs.Provider.get_app_specs(ctx.team)
       Livebook.Apps.Manager.sync_permanent_apps()
 
       assert_receive {:app_created, %{slug: ^slug}}, 3_000
-      assert_receive {:apps_manager_status, [%{app_spec: ^app_spec, running?: false}]}
       assert_receive {:teams_broadcast, {:agent_updated, _agent}}
 
-      assert erpc_call(node, :get_apps_metadatas, [deployment_group_id]) == %{
+      assert TeamsRPC.get_apps_metadatas(ctx.node, deployment_group_id) == %{
                app_spec.version => %{
                  id: app_spec.app_deployment_id,
                  status: :preparing,
@@ -726,11 +799,10 @@ defmodule Livebook.Hubs.TeamClientTest do
                         sessions: [%{app_status: %{execution: :executed}}]
                       }}
 
-      assert_receive {:apps_manager_status, [%{app_spec: ^app_spec, running?: true}]}
-      assert app_deployment in TeamClient.get_app_deployments(team.id)
+      assert app_deployment in TeamClient.get_app_deployments(hub_id)
       assert_receive {:teams_broadcast, {:agent_updated, _agent}}
 
-      assert erpc_call(node, :get_apps_metadatas, [deployment_group_id]) == %{
+      assert TeamsRPC.get_apps_metadatas(ctx.node, deployment_group_id) == %{
                app_spec.version => %{
                  id: app_spec.app_deployment_id,
                  status: :available,
@@ -738,74 +810,118 @@ defmodule Livebook.Hubs.TeamClientTest do
                }
              }
 
-      erpc_call(node, :toggle_app_deployment, [app_deployment.id, teams_org.id])
+      TeamsRPC.toggle_app_deployment(ctx.node, app_deployment.id, ctx.org.id)
 
       assert_receive {:app_deployment_stopped, ^app_deployment}
-      assert_receive {:apps_manager_status, [%{app_spec: ^app_spec, running?: false}]}
-      refute app_deployment in TeamClient.get_app_deployments(team.id)
+      refute app_deployment in TeamClient.get_app_deployments(hub_id)
 
       assert_receive {:app_closed,
                       %{
                         slug: ^slug,
                         warnings: [],
-                        sessions: [%{app_status: %{execution: :executed}}]
+                        sessions: [%{app_status: %{execution: :executed, lifecycle: :active}}]
                       }}
 
       assert_receive {:teams_broadcast, {:agent_updated, _agent}}
-      assert erpc_call(node, :get_apps_metadatas, [deployment_group_id]) == %{}
+      assert TeamsRPC.get_apps_metadatas(ctx.node, deployment_group_id) == %{}
     end
 
-    test "dispatches the agents list",
-         %{
-           team: team,
-           agent_connected: agent_connected,
-           deployment_group: %{id: deployment_group_id}
-         } do
-      deployment_group_id = to_string(deployment_group_id)
-      org_id = to_string(team.org_id)
-      hub_id = team.id
+    # We must assert `agent_joined` manually, so we don't persist the hub during setup
+    @tag teams_persisted: false
+    test "dispatches the agents list", %{agent_connected: agent_connected} = ctx do
+      id = to_string(ctx.deployment_group.id)
+      hub_id = ctx.team.id
+      org_id = to_string(ctx.org.id)
 
-      pid = connect_to_teams(team)
+      Livebook.Hubs.save_hub(ctx.team)
+      pid = TeamClient.get_pid(hub_id)
 
-      # Since we're connecting as Agent, we should receive the
-      # `:agent_joined` event from `:agent_connected` event
       assert_receive {:agent_joined,
-                      %{
-                        hub_id: ^hub_id,
-                        org_id: ^org_id,
-                        deployment_group_id: ^deployment_group_id
-                      } = agent}
+                      %{hub_id: ^hub_id, deployment_group_id: ^id, org_id: ^org_id} = agent}
 
-      assert agent in TeamClient.get_agents(team.id)
+      assert agent in TeamClient.get_agents(hub_id)
 
-      assert_receive {:deployment_group_created, deployment_group}
-
-      livebook_proto_deployment_group =
-        %LivebookProto.DeploymentGroup{
-          id: to_string(deployment_group.id),
-          name: deployment_group.name,
-          mode: to_string(deployment_group.mode),
-          secrets: [],
-          agent_keys: []
-        }
-
-      agent_connected = %{
-        agent_connected
-        | deployment_groups: [livebook_proto_deployment_group],
-          agents: []
-      }
-
+      agent_connected = %{agent_connected | agents: []}
       send(pid, {:event, :agent_connected, agent_connected})
       assert_receive {:agent_left, ^agent}
-      refute agent in TeamClient.get_agents(team.id)
+      refute agent in TeamClient.get_agents(hub_id)
     end
-  end
 
-  defp connect_to_teams(%{id: id} = team) do
-    Livebook.Hubs.save_hub(team)
-    assert_receive {:hub_connected, ^id}
-    assert_receive {:client_connected, ^id}
+    test "dispatches the app folders list",
+         %{team: team, pid: pid, agent_connected: agent_connected} do
+      app_folder = build(:app_folder, hub_id: team.id)
 
-    TeamClient.get_pid(team.id)
+      livebook_proto_app_folder =
+        %LivebookProto.AppFolder{
+          id: app_folder.id,
+          name: app_folder.name
+        }
+
+      # creates the app folder
+      agent_connected = %{agent_connected | app_folders: [livebook_proto_app_folder]}
+      refute_received {:app_folder_created, ^app_folder}
+      send(pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:app_folder_created, ^app_folder}
+      assert app_folder in TeamClient.get_app_folders(team.id)
+
+      # updates the app folder
+      updated_app_folder = %{app_folder | name: "ChonkiestCat"}
+
+      updated_livebook_proto_app_folder = %{
+        livebook_proto_app_folder
+        | name: updated_app_folder.name
+      }
+
+      agent_connected = %{agent_connected | app_folders: [updated_livebook_proto_app_folder]}
+      send(pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:app_folder_updated, ^updated_app_folder}
+      refute app_folder in TeamClient.get_app_folders(team.id)
+      assert updated_app_folder in TeamClient.get_app_folders(team.id)
+
+      # deletes the app folder
+      agent_connected = %{agent_connected | app_folders: []}
+      send(pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:app_folder_deleted, ^updated_app_folder}
+      refute updated_app_folder in TeamClient.get_app_folders(team.id)
+    end
+
+    test "dispatches the notifications list",
+         %{team: team, pid: pid, agent_connected: agent_connected} do
+      notification = build(:notification)
+
+      livebook_proto_notification =
+        %LivebookProto.Notification{
+          id: notification.id,
+          kind: notification.kind,
+          message: to_string(notification.message)
+        }
+
+      # appends the notification
+      agent_connected = %{agent_connected | notifications: [livebook_proto_notification]}
+      refute_received {:notification_sent, ^notification}
+      send(pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:notification_sent, ^notification}
+      assert notification in TeamClient.get_notifications(team.id)
+
+      # updates the notification
+      updated_notification = %{notification | message: "Update to 0.19.0"}
+
+      updated_livebook_proto_notification = %{
+        livebook_proto_notification
+        | message: updated_notification.message
+      }
+
+      agent_connected = %{agent_connected | notifications: [updated_livebook_proto_notification]}
+      send(pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:notification_updated, ^updated_notification}
+      refute notification in TeamClient.get_notifications(team.id)
+      assert updated_notification in TeamClient.get_notifications(team.id)
+
+      # deletes the notification
+      agent_connected = %{agent_connected | notifications: []}
+      send(pid, {:event, :agent_connected, agent_connected})
+      assert_receive {:notification_deleted, ^updated_notification}
+      refute notification in TeamClient.get_notifications(team.id)
+    end
   end
 end

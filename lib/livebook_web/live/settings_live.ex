@@ -1,8 +1,6 @@
 defmodule LivebookWeb.SettingsLive do
   use LivebookWeb, :live_view
 
-  alias LivebookWeb.LayoutComponents
-
   on_mount LivebookWeb.SidebarHook
 
   @impl true
@@ -20,6 +18,8 @@ defmodule LivebookWeb.SettingsLive do
          dialog_opened?: false
        },
        update_check_enabled: Livebook.UpdateCheck.enabled?(),
+       dev_endpoints_enabled: Livebook.Settings.dev_endpoints_enabled?(),
+       release_info: Livebook.Config.github_release_info(),
        page_title: "Settings - Livebook"
      )}
   end
@@ -27,23 +27,25 @@ defmodule LivebookWeb.SettingsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <LayoutComponents.layout
+    <Layouts.layout
+      flash={@flash}
+      confirm_state={@confirm_state}
       current_page={~p"/settings"}
       current_user={@current_user}
+      teams_auth={@teams_auth}
       saved_hubs={@saved_hubs}
+      notifications={@notifications}
     >
-      <div id="settings-page" class="p-4 md:px-12 md:py-7 max-w-screen-md mx-auto space-y-16">
-        <!-- System settings section -->
+      <div id="settings-page" class="p-4 md:px-12 md:py-7 max-w-(--breakpoint-md) mx-auto space-y-16">
         <div class="flex flex-col space-y-10">
           <div>
-            <LayoutComponents.title text="System settings" />
+            <.title text="System settings" />
             <p class="mt-4 text-gray-700">
               Here you can change global Livebook configuration. Keep in mind
               that this configuration gets persisted and will be restored on application
               launch.
             </p>
           </div>
-          <!-- System details -->
           <div class="flex flex-col space-y-2">
             <h2 class="text-xl text-gray-800 font-medium">
               About
@@ -53,14 +55,20 @@ defmodule LivebookWeb.SettingsLive do
                 <.labeled_text :if={app_name = Livebook.Config.app_service_name()} label="Application">
                   <%= if app_url = Livebook.Config.app_service_url() do %>
                     <a href={app_url} class="underline hover:no-underline" target="_blank">
-                      {app_name}
+                      {app_name} <.remix_icon icon="external-link-line" />
                     </a>
                   <% else %>
                     {app_name}
                   <% end %>
                 </.labeled_text>
                 <.labeled_text label="Livebook">
-                  v{Livebook.Config.app_version()}
+                  <a
+                    href={"https://github.com/#{@release_info.repo}/releases/tag/v#{@release_info.version}"}
+                    target="_blank"
+                  >
+                    v{@release_info.version}
+                    <.remix_icon icon="external-link-line" />
+                  </a>
                 </.labeled_text>
                 <.labeled_text label="Elixir">
                   v{System.version()}
@@ -75,12 +83,11 @@ defmodule LivebookWeb.SettingsLive do
               </div>
             </div>
           </div>
-          <!-- Updates -->
           <div class="flex flex-col space-y-4">
             <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
               Updates
             </h2>
-            <form class="mt-4" phx-change="save" phx-nosubmit>
+            <form phx-change="save" phx-nosubmit>
               <.switch_field
                 name="update_check_enabled"
                 label="Show banner when a new Livebook version is available"
@@ -88,7 +95,6 @@ defmodule LivebookWeb.SettingsLive do
               />
             </form>
           </div>
-          <!-- Autosave path configuration -->
           <div class="flex flex-col space-y-4">
             <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
               Autosave
@@ -98,13 +104,34 @@ defmodule LivebookWeb.SettingsLive do
             </p>
             <.autosave_path_select state={@autosave_path_state} />
           </div>
-          <!-- Environment variables configuration -->
+          <div class="flex flex-col space-y-4">
+            <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
+              Dev endpoints
+            </h2>
+            <form phx-change="save" phx-nosubmit>
+              <.switch_field
+                name="dev_endpoints_enabled"
+                value={@dev_endpoints_enabled}
+              >
+                <span>
+                  Control Livebook via local HTTP endpoints under <code>/dev</code>
+                  <a
+                    class="text-sm text-uppercase text-blue-600 ml-2"
+                    href="https://hexdocs.pm/livebook/dev_endpoints.html"
+                    target="_blank"
+                  >
+                    Learn more <.remix_icon icon="external-link-line" />
+                  </a>
+                </span>
+              </.switch_field>
+            </form>
+          </div>
           <div class="flex flex-col space-y-4">
             <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
               Environment variables
             </h2>
 
-            <p class="mt-4 text-gray-700">
+            <p class="text-gray-700">
               Environment variables store global values, specific to this
               Livebook instance, which are available inside your notebooks.
               You can also configure the <code>PATH</code> environment to
@@ -125,16 +152,14 @@ defmodule LivebookWeb.SettingsLive do
             </div>
           </div>
         </div>
-        <!-- User settings section -->
         <div class="flex flex-col space-y-10 pb-8">
           <div>
-            <LayoutComponents.title text="User settings" />
+            <.title text="User settings" />
             <p class="mt-4 text-gray-700">
               The configuration in this section changes only your Livebook
               experience and is saved in your browser.
             </p>
           </div>
-          <!-- Editor configuration -->
           <div class="flex flex-col space-y-4">
             <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
               Code editor
@@ -188,7 +213,7 @@ defmodule LivebookWeb.SettingsLive do
           </div>
         </div>
       </div>
-    </LayoutComponents.layout>
+    </Layouts.layout>
 
     <.modal
       :if={@live_action in [:add_env_var, :edit_env_var]}
@@ -317,6 +342,12 @@ defmodule LivebookWeb.SettingsLive do
     enabled = enabled == "true"
     Livebook.UpdateCheck.set_enabled(enabled)
     {:noreply, assign(socket, :update_check_enabled, enabled)}
+  end
+
+  def handle_event("save", %{"dev_endpoints_enabled" => enabled}, socket) do
+    enabled = enabled == "true"
+    Livebook.Settings.set_dev_endpoints_enabled(enabled)
+    {:noreply, assign(socket, :dev_endpoints_enabled, enabled)}
   end
 
   def handle_event("save", %{"env_var" => attrs}, socket) do

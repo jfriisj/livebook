@@ -61,7 +61,7 @@ server in solely client-side operations.
   }
 
   [data-el-cell][data-js-focused] {
-    @apply border-blue-300 border-opacity-100;
+    @apply border-blue-300;
 
     [data-el-cell-focus-indicator] {
       @apply bg-blue-300;
@@ -124,77 +124,64 @@ server in solely client-side operations.
     }
   }
 
-  [data-el-cell][data-type="setup"]:not(
-      [data-js-focused],
-      [data-eval-validity="fresh"]:not([data-js-empty]),
-      [data-eval-errored],
-      [data-js-changed]
-    ) {
-    [data-el-editor-box] {
+  /* When all setup cells satisfy collapse conditions, collapse the
+     first one and hide the later ones */
+  [data-el-setup-section]:not(
+    :has(
+      [data-el-cell][data-setup]:is(
+          [data-js-focused],
+          [data-eval-validity="fresh"]:not([data-js-empty]),
+          [data-eval-errored],
+          [data-js-changed]
+        )
+    ),
+    :focus-within
+  ) {
+    [data-el-cell][data-setup]:not(:first-child) {
       @apply hidden;
     }
 
-    [data-el-outputs-container] {
+    [data-el-cell][data-setup]:first-child {
+      [data-el-editor-box] {
+        @apply hidden;
+      }
+
+      [data-el-outputs-container] {
+        @apply hidden;
+      }
+
+      [data-el-cell-indicator] {
+        @apply bg-gray-50 border-gray-200 text-gray-500;
+      }
+    }
+
+    [data-el-language-buttons] {
       @apply hidden;
     }
+  }
 
-    [data-el-cell-indicator] {
-      @apply bg-gray-50 border-gray-200 text-gray-500;
+  /* This is "else" for the above  */
+  [data-el-setup-section]:is(
+    :has(
+      [data-el-cell][data-setup]:is(
+          [data-js-focused],
+          [data-eval-validity="fresh"]:not([data-js-empty]),
+          [data-eval-errored],
+          [data-js-changed]
+        )
+    ),
+    :focus-within
+  ) {
+    [data-el-cell][data-setup] {
+      [data-el-info-box] {
+        @apply hidden;
+      }
+
+      /* Make the primary actions visible for all cells */
+      [data-el-actions][data-primary] {
+        @apply opacity-100;
+      }
     }
-  }
-
-  [data-el-cell][data-type="setup"]:is(
-      [data-js-focused],
-      [data-eval-validity="fresh"]:not([data-js-empty]),
-      [data-eval-errored],
-      [data-js-changed]
-    )
-    [data-el-info-box] {
-    @apply hidden;
-  }
-
-  /* Outputs */
-
-  [data-el-cell][data-js-amplified] {
-    [data-el-amplify-outputs-button] > button {
-      @apply bg-gray-100 text-gray-900;
-    }
-
-    [data-el-outputs-container] {
-      @apply bg-white m-0 py-16;
-
-      width: 90vw;
-      position: relative;
-      left: calc(-45vw + 50%);
-    }
-  }
-
-  [data-el-output][data-border] {
-    @apply p-4 border border-t-0 border-gray-200 divide-y divide-gray-200;
-  }
-
-  [data-el-output][data-border]:first-child {
-    @apply rounded-t-lg border-t;
-  }
-
-  [data-el-output]:not([data-border]) + [data-el-output][data-border] {
-    @apply border-t;
-  }
-
-  [data-el-output][data-border]:last-child {
-    @apply rounded-b-lg border-b;
-  }
-
-  [data-el-output]:not(:first-child) {
-    @apply mt-2;
-  }
-
-  [data-el-output][data-border] + [data-el-output][data-border] {
-    @apply mt-0;
-  }
-
-  [data-el-outputs-container] > [data-el-output]:first-child {
-    @apply mt-2;
   }
 
   /* Side panel */
@@ -288,7 +275,7 @@ server in solely client-side operations.
     }
 
     [data-el-sections-container] {
-      @apply space-y-0 mt-0;
+      @apply gap-1 mt-1;
     }
   }
 
@@ -299,13 +286,11 @@ server in solely client-side operations.
   }
 
   &[data-js-hide-code] {
-    [data-el-cell]:is(
-        [data-type="code"],
-        [data-type="setup"],
-        [data-type="smart"]
-      ):not([data-js-insert-mode]) {
+    [data-el-cell]:is([data-type="code"], [data-type="smart"]):not(
+        [data-js-insert-mode]
+      ) {
       [data-el-editor-box],
-      &[data-type="setup"] [data-el-info-box],
+      &[data-setup] [data-el-info-box],
       &[data-type="smart"] [data-el-ui-box] {
         @apply hidden;
       }
@@ -338,5 +323,75 @@ server in solely client-side operations.
     [data-el-toggle-sidebar] {
       @apply hidden;
     }
+  }
+}
+
+[data-el-notebook] {
+  /* Output size (both session and app) */
+
+  [data-output-size="default"][data-el-app-outputs-container] {
+    @apply w-full mx-auto;
+
+    max-width: var(--breakpoint-lg);
+  }
+
+  [data-output-size="wide"] {
+    &[data-el-app-outputs-container] {
+      @apply w-full mx-auto;
+
+      max-width: 90rem;
+    }
+
+    [data-el-outputs-container] {
+      @apply bg-white m-0 relative;
+
+      width: 90rem;
+      left: calc(-45rem + 50%);
+    }
+  }
+
+  [data-output-size="full"] {
+    &[data-el-app-outputs-container] {
+      @apply w-full mx-auto;
+
+      max-width: 92vw;
+    }
+
+    [data-el-outputs-container] {
+      @apply bg-white m-0 relative;
+
+      width: 92vw;
+      left: calc(-46vw + 50%);
+    }
+  }
+
+  /* Outputs (both session and app) */
+
+  [data-el-output][data-border] {
+    @apply p-4 border border-t-0 border-gray-200 divide-y divide-gray-200;
+  }
+
+  [data-el-output][data-border]:first-child {
+    @apply rounded-t-lg border-t;
+  }
+
+  [data-el-output]:not([data-border]) + [data-el-output][data-border] {
+    @apply border-t;
+  }
+
+  [data-el-output][data-border]:last-child {
+    @apply rounded-b-lg border-b;
+  }
+
+  [data-el-output]:not(:first-child) {
+    @apply mt-2;
+  }
+
+  [data-el-output][data-border] + [data-el-output][data-border] {
+    @apply mt-0;
+  }
+
+  [data-el-outputs-container] > [data-el-output]:first-child {
+    @apply mt-2;
   }
 }

@@ -7,6 +7,7 @@ defmodule Livebook.Notebook.Cell.Code do
   defstruct [
     :id,
     :source,
+    :output_size,
     :outputs,
     :language,
     :reevaluate_automatically,
@@ -19,8 +20,9 @@ defmodule Livebook.Notebook.Cell.Code do
   @type t :: %__MODULE__{
           id: Cell.id(),
           source: String.t() | :__pruned__,
+          output_size: Cell.output_size(),
           outputs: list(Cell.indexed_output()),
-          language: :elixir | :erlang,
+          language: Livebook.Runtime.language(),
           reevaluate_automatically: boolean(),
           continue_on_error: boolean()
         }
@@ -33,10 +35,23 @@ defmodule Livebook.Notebook.Cell.Code do
     %__MODULE__{
       id: Utils.random_id(),
       source: "",
+      output_size: :default,
       outputs: [],
       language: :elixir,
       reevaluate_automatically: false,
       continue_on_error: false
     }
+  end
+
+  @doc """
+  Return the list of supported languages for code cells.
+  """
+  @spec languages() :: list(%{name: String.t(), language: atom()})
+  def languages() do
+    [
+      %{name: "Elixir", language: :elixir},
+      %{name: "Erlang", language: :erlang},
+      %{name: "Python", language: :python}
+    ]
   end
 end

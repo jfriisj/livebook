@@ -21,6 +21,10 @@ defmodule LivebookWeb.Router do
     plug :within_iframe_secure_headers
   end
 
+  pipeline :api do
+    plug :accepts, ["json"]
+  end
+
   pipeline :auth do
     # If identity provider is enabled and we don't have access
     # we don't want to show Livebook's authentication
@@ -58,8 +62,17 @@ defmodule LivebookWeb.Router do
     get "/sessions/image-input/:token", SessionController, :show_input_image
   end
 
+  scope "/dev", LivebookWeb do
+    pipe_through :api
+
+    post "/sync", DevController, :sync
+    post "/open", DevController, :open
+    post "/restamp", DevController, :restamp
+  end
+
   live_session :default,
-    on_mount: [LivebookWeb.AuthHook, LivebookWeb.UserHook, LivebookWeb.Confirm] do
+    on_mount: [LivebookWeb.UserHook, LivebookWeb.AuthHook, LivebookWeb.Confirm],
+    session: {LivebookWeb.UserPlug, :extra_lv_session, []} do
     scope "/", LivebookWeb do
       pipe_through [:browser, :auth]
 
@@ -138,7 +151,8 @@ defmodule LivebookWeb.Router do
   end
 
   live_session :apps,
-    on_mount: [LivebookWeb.AppAuthHook, LivebookWeb.UserHook, LivebookWeb.Confirm] do
+    on_mount: [LivebookWeb.UserHook, LivebookWeb.AppAuthHook, LivebookWeb.Confirm],
+    session: {LivebookWeb.UserPlug, :extra_lv_session, []} do
     scope "/", LivebookWeb do
       pipe_through [:browser, :user]
 
@@ -176,7 +190,9 @@ defmodule LivebookWeb.Router do
 
   defp within_iframe_secure_headers(conn, _opts) do
     if Livebook.Config.within_iframe?() do
-      delete_resp_header(conn, "x-frame-options")
+      [value] = get_resp_header(conn, "content-security-policy")
+      value = String.replace(value, "frame-ancestors 'self';", "frame-ancestors *;")
+      put_resp_header(conn, "content-security-policy", value)
     else
       conn
     end

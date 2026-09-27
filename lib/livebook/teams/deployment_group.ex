@@ -2,8 +2,8 @@ defmodule Livebook.Teams.DeploymentGroup do
   use Ecto.Schema
   import Ecto.Changeset
 
-  alias Livebook.Secrets.Secret
-  alias Livebook.Teams.{AgentKey, EnvironmentVariable}
+  alias Livebook.Secrets
+  alias Livebook.Teams
 
   @type t :: %__MODULE__{
           id: String.t() | nil,
@@ -13,9 +13,13 @@ defmodule Livebook.Teams.DeploymentGroup do
           clustering: :auto | :dns | nil,
           hub_id: String.t() | nil,
           teams_auth: boolean(),
-          secrets: Ecto.Schema.has_many(Secret.t()),
-          agent_keys: Ecto.Schema.has_many(AgentKey.t()),
-          environment_variables: Ecto.Schema.has_many(EnvironmentVariable.t())
+          groups_auth: boolean(),
+          deployed_apps_counter: non_neg_integer(),
+          authorization_groups: Ecto.Schema.embeds_many(Teams.AuthorizationGroup.t()),
+          deployment_users: Ecto.Schema.embeds_many(Teams.DeploymentUser.t()),
+          secrets: Ecto.Schema.has_many(Secrets.Secret.t()),
+          agent_keys: Ecto.Schema.has_many(Teams.AgentKey.t()),
+          environment_variables: Ecto.Schema.has_many(Teams.EnvironmentVariable.t())
         }
 
   @primary_key {:id, :string, autogenerate: false}
@@ -26,15 +30,20 @@ defmodule Livebook.Teams.DeploymentGroup do
     field :clustering, Ecto.Enum, values: [:auto, :dns]
     field :url, :string
     field :teams_auth, :boolean, default: true
+    field :groups_auth, :boolean, default: false
+    field :deploy_auth, :boolean, default: false
+    field :deployed_apps_counter, :integer, default: 0
 
-    has_many :secrets, Secret
-    has_many :agent_keys, AgentKey
-    has_many :environment_variables, EnvironmentVariable
+    has_many :secrets, Secrets.Secret
+    has_many :agent_keys, Teams.AgentKey
+    has_many :environment_variables, Teams.EnvironmentVariable
+    embeds_many :authorization_groups, Teams.AuthorizationGroup
+    embeds_many :deployment_users, Teams.DeploymentUser
   end
 
   def changeset(deployment_group, attrs \\ %{}) do
     deployment_group
-    |> cast(attrs, [:id, :name, :mode, :hub_id, :clustering, :url, :teams_auth])
+    |> cast(attrs, [:id, :name, :mode, :hub_id, :clustering, :url])
     |> validate_required([:name, :mode])
     |> update_change(:url, fn url ->
       if url do

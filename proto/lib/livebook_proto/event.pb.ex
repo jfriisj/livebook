@@ -1,5 +1,5 @@
 defmodule LivebookProto.Event do
-  use Protobuf, syntax: :proto3, protoc_gen_elixir_version: "0.13.0"
+  use Protobuf, full_name: "Event", protoc_gen_elixir_version: "0.16.0", syntax: :proto3
 
   oneof :type, 0
 
@@ -73,4 +73,29 @@ defmodule LivebookProto.Event do
     oneof: 0
 
   field :org_updated, 17, type: LivebookProto.OrgUpdated, json_name: "orgUpdated", oneof: 0
+
+  field :app_deployment_updated, 18,
+    type: LivebookProto.AppDeploymentUpdated,
+    json_name: "appDeploymentUpdated",
+    oneof: 0
+
+  field :app_folder_created, 19,
+    type: LivebookProto.AppFolderCreated,
+    json_name: "appFolderCreated",
+    oneof: 0
+
+  field :app_folder_updated, 20,
+    type: LivebookProto.AppFolderUpdated,
+    json_name: "appFolderUpdated",
+    oneof: 0
+
+  field :app_folder_deleted, 21,
+    type: LivebookProto.AppFolderDeleted,
+    json_name: "appFolderDeleted",
+    oneof: 0
+
+  field :deployment_status_updated, 22,
+    type: LivebookProto.DeploymentStatusUpdated,
+    json_name: "deploymentStatusUpdated",
+    oneof: 0
 end

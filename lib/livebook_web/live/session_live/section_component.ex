@@ -140,7 +140,7 @@ defmodule LivebookWeb.SessionLive.SectionComponent do
         {LivebookWeb.HTMLHelpers.pluralize(length(@section_view.cell_views), "cell", "cells")} collapsed
       </h3>
       <div class="container" data-el-section-content>
-        <div class="flex flex-col space-y-1">
+        <div class="flex flex-col gap-1">
           <.live_component
             module={LivebookWeb.SessionLive.InsertButtonsComponent}
             id={"insert-buttons-#{@section_view.id}-first"}
@@ -163,6 +163,7 @@ defmodule LivebookWeb.SessionLive.SectionComponent do
               runtime_status={@runtime_status}
               installing?={@installing?}
               allowed_uri_schemes={@allowed_uri_schemes}
+              enabled_languages={@enabled_languages}
               cell_view={cell_view}
             />
             <.live_component
@@ -224,7 +225,7 @@ defmodule LivebookWeb.SessionLive.SectionComponent do
           <.remix_icon
             :if={@section_view.parent}
             icon="arrow-right-s-line"
-            class={[(@section_view.parent && @section_view.parent.id == parent.id) || "invisible"]}
+            class={[@section_view.parent.id == parent.id || "invisible"]}
           />
           <span>{parent.name}</span>
         </button>

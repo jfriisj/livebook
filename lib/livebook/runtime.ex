@@ -5,6 +5,12 @@ defprotocol Livebook.Runtime do
   # evaluation, which could be running on a different node, however
   # the protocol does not require that.
   #
+  # Note that a runtime handles code evaluation in multiple languages.
+  # The purpose of this protocol is not to abstract language backend,
+  # but to abstract where the code runs - locally, remotely, inside a
+  # specific node, etc. In practice all runtime implementations share
+  # most of the functionality by calling `Livebook.Runtime.ErlDist.RuntimeServer`.
+  #
   # ## Files
   #
   # The runtime can request access to notebook files by sending a
@@ -33,6 +39,11 @@ defprotocol Livebook.Runtime do
   #
   # The owner replies with `{:runtime_app_info_reply, reply}`, where
   # reply is `{:ok, info}` and `info` is a details map.
+
+  @typedoc """
+  A language accepted for code evaluation.
+  """
+  @type language :: :elixir | :erlang | :python | :"pyproject.toml"
 
   @typedoc """
   An arbitrary term identifying an evaluation container.
@@ -572,7 +583,7 @@ defprotocol Livebook.Runtime do
   @type signature_request :: {:signature, hint :: String.t()}
 
   @type signature_response :: %{
-          active_argument: non_neg_integer(),
+          active_argument: non_neg_integer() | nil,
           items: list(signature_item())
         }
 
@@ -631,7 +642,6 @@ defprotocol Livebook.Runtime do
 
   Additionally, the runtime may report extra definitions that require
   installing external packages, as described by `:requirement_presets`.
-  Also see `add_dependencies/3`.
   """
   @type smart_cell_definition :: %{
           kind: String.t(),
@@ -647,55 +657,12 @@ defprotocol Livebook.Runtime do
 
   @type dependency :: term()
 
-  @type search_packages_response :: {:ok, list(package_details())} | {:error, String.t()}
-
   @type package_details :: %{
           name: String.t(),
           version: String.t(),
           description: String.t() | nil,
           url: String.t() | nil,
           dependency: dependency()
-        }
-
-  @typedoc """
-  An information about a predefined code snippets.
-  """
-  @type snippet_definition :: example_snippet_definition() | file_action_snippet_definition()
-
-  @typedoc """
-  Code snippet with fixed source, serving as an example or boilerplate.
-  """
-  @type example_snippet_definition :: %{
-          type: :example,
-          name: String.t(),
-          icon: String.t(),
-          variants:
-            list(%{
-              name: String.t(),
-              source: String.t(),
-              packages: list(package())
-            })
-        }
-
-  @typedoc """
-  Code snippet for acting on files of the given type.
-
-  The action is applicable to files matching any of the specified types,
-  where a type can be either:
-
-    * specific MIME type, like `text/csv`
-    * MIME type family, like `image/*`
-    * file extension, like `.csv`
-
-  The source is expected to include `{{NAME}}`, which is replaced with
-  the actual file name.
-  """
-  @type file_action_snippet_definition :: %{
-          type: :file_action,
-          file_types: :any | list(String.t()),
-          description: String.t(),
-          source: String.t(),
-          packages: list(package())
         }
 
   @type smart_cell_ref :: String.t()
@@ -850,7 +817,7 @@ defprotocol Livebook.Runtime do
 
   """
   @spec take_ownership(t(), keyword()) :: reference()
-  def take_ownership(runtime, opts \\ [])
+  def take_ownership(runtime, opts)
 
   @doc """
   Synchronously disconnects the runtime and cleans up the underlying
@@ -866,7 +833,7 @@ defprotocol Livebook.Runtime do
   any information added by `connect/1`. It should not have any side
   effects.
   """
-  @spec duplicate(Runtime.t()) :: Runtime.t()
+  @spec duplicate(t()) :: t()
   def duplicate(runtime)
 
   @doc """
@@ -927,8 +894,8 @@ defprotocol Livebook.Runtime do
       they are fetched and compiled from scratch
 
   """
-  @spec evaluate_code(t(), atom(), String.t(), locator(), parent_locators(), keyword()) :: :ok
-  def evaluate_code(runtime, language, code, locator, parent_locators, opts \\ [])
+  @spec evaluate_code(t(), language(), String.t(), locator(), parent_locators(), keyword()) :: :ok
+  def evaluate_code(runtime, language, code, locator, parent_locators, opts)
 
   @doc """
   Disposes of an evaluation identified by the given locator.
@@ -964,16 +931,17 @@ defprotocol Livebook.Runtime do
   @spec handle_intellisense(
           t(),
           pid(),
+          language(),
           intellisense_request(),
           parent_locators(),
           {atom(), atom()} | nil
         ) :: reference()
-  def handle_intellisense(runtime, send_to, request, parent_locators, node)
+  def handle_intellisense(runtime, send_to, language, request, parent_locators, node)
 
   @doc """
   Reads file at the given absolute path within the runtime file system.
   """
-  @spec read_file(Runtime.t(), String.t()) :: {:ok, binary()} | {:error, String.t()}
+  @spec read_file(t(), String.t()) :: {:ok, binary()} | {:error, String.t()}
   def read_file(runtime, path)
 
   @doc """
@@ -1071,24 +1039,17 @@ defprotocol Livebook.Runtime do
   def stop_smart_cell(runtime, ref)
 
   @doc """
-  Returns true if the given runtime by definition has only a specific
-  set of dependencies.
+  Returns true if the given runtime supports adding dependencies at
+  runtime, after it boots.
 
-  Note that if restarting the runtime allows for installing different
-  dependencies, the dependencies are not considered fixed.
+  Contrarily, some runtimes boot with a predefined set of dependencies
+  that cannot be changed, in which case this function returns false.
 
-  When dependencies are fixed, the following functions are allowed to
-  raise an implementation error: `add_dependencies/3`, `search_packages/3`.
+  When dependencies are not supported, the following functions are
+  allowed to raise an implementation error: `packages_source/1`.
   """
-  @spec fixed_dependencies?(t()) :: boolean()
-  def fixed_dependencies?(runtime)
-
-  @doc """
-  Updates the given source code to install the given dependencies.
-  """
-  @spec add_dependencies(t(), String.t(), list(dependency())) ::
-          {:ok, String.t()} | {:error, String.t()}
-  def add_dependencies(runtime, code, dependencies)
+  @spec supports_dependencies?(t()) :: boolean()
+  def supports_dependencies?(runtime)
 
   @doc """
   Checks if the given dependencies are installed within the runtime.
@@ -1097,21 +1058,19 @@ defprotocol Livebook.Runtime do
   def has_dependencies?(runtime, dependencies)
 
   @doc """
-  Returns a list of predefined code snippets.
-  """
-  @spec snippet_definitions(t()) :: list(snippet_definition())
-  def snippet_definitions(runtime)
+  Describes which packages are available to be installed within the
+  runtime.
 
-  @doc """
-  Looks up packages matching the given search.
+  Supported sources:
 
-  The response is sent to the `send_to` process as
+    * `:hex` - any package on Hex
 
-    * `{:runtime_search_packages_response, ref, response}`.
+    * `{:list, [package_details()]}` - a specific list of available
+      packages
 
   """
-  @spec search_packages(t(), pid(), String.t()) :: reference()
-  def search_packages(runtime, send_to, search)
+  @spec packages_source(t()) :: :hex | {:list, [package_details()]}
+  def packages_source(runtime)
 
   @doc """
   Sets the given environment variables.
@@ -1148,10 +1107,10 @@ defprotocol Livebook.Runtime do
   @doc """
   Fetches information about a proxy request handler, if available.
 
-  When the handler is available, this function returns MFA. In order
-  to handle a connection, the caller should invoke the MFA, appending
-  `conn` to the argument list, where `conn` is a `%Plug.Conn{}` struct
-  for the specific request.
+  When the handler is registered within the runtime, this function
+  returns MFA. In order to handle a connection, the caller should
+  invoke the MFA, appending `conn` to the argument list, where `conn`
+  is a `%Plug.Conn{}` struct for the specific request.
 
   Once done, the handler MFA should return the final `conn`.
   """
@@ -1161,7 +1120,7 @@ defprotocol Livebook.Runtime do
   @doc """
   Asks the runtime to disconnect from the given connected node.
 
-  The node should be one of `connected_nodes()` reported by the runtime
+  The node should be one of `t:connected_nodes/0` reported by the runtime
   earlier.
   """
   @spec disconnect_node(t(), node()) :: :ok

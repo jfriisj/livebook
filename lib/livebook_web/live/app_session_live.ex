@@ -8,10 +8,33 @@ defmodule LivebookWeb.AppSessionLive do
   alias Livebook.Notebook.Cell
 
   @impl true
-  def mount(%{"slug" => slug, "id" => session_id}, _session, socket)
-      when socket.assigns.app_authenticated? do
-    {:ok, app} = Livebook.Apps.fetch_app(slug)
+  def mount(%{"slug" => slug} = params, _session, socket)
+      when not socket.assigns.app_authenticated? do
+    if connected?(socket) do
+      to =
+        if id = params["id"] do
+          ~p"/apps/#{slug}/authenticate?id=#{id}"
+        else
+          ~p"/apps/#{slug}/authenticate"
+        end
 
+      {:ok, push_navigate(socket, to: to)}
+    else
+      {:ok, socket}
+    end
+  end
+
+  def mount(%{"slug" => slug, "id" => session_id}, _session, socket)
+      when not socket.assigns.app_authorized? do
+    if connected?(socket) do
+      Livebook.Teams.Broadcasts.subscribe(:app_deployments)
+    end
+
+    {:ok, assign(socket, slug: slug, session: %{id: session_id}), layout: false}
+  end
+
+  def mount(%{"slug" => slug, "id" => session_id}, _session, socket) do
+    {:ok, app} = Livebook.Apps.fetch_app(slug)
     app_session = Enum.find(app.sessions, &(&1.id == session_id))
 
     if app_session && app_session.app_status.lifecycle == :active do
@@ -23,6 +46,7 @@ defmodule LivebookWeb.AppSessionLive do
           {data, client_id} =
             Session.register_client(session_pid, self(), socket.assigns.current_user)
 
+          Livebook.Teams.Broadcasts.subscribe(:app_deployments)
           Session.subscribe(session_id)
 
           {data, client_id}
@@ -36,6 +60,7 @@ defmodule LivebookWeb.AppSessionLive do
        |> assign(
          slug: slug,
          session: session,
+         apps_banner: Livebook.Config.apps_banner(),
          page_title: get_page_title(data.notebook.name),
          client_id: client_id,
          data_view: data_to_view(data)
@@ -52,21 +77,6 @@ defmodule LivebookWeb.AppSessionLive do
     end
   end
 
-  def mount(%{"slug" => slug} = params, _session, socket) do
-    if connected?(socket) do
-      to =
-        if id = params["id"] do
-          ~p"/apps/#{slug}/authenticate?id=#{id}"
-        else
-          ~p"/apps/#{slug}/authenticate"
-        end
-
-      {:ok, push_navigate(socket, to: to)}
-    else
-      {:ok, socket}
-    end
-  end
-
   # Puts the given assigns in `socket.private`,
   # to ensure they are not used for rendering.
   defp assign_private(socket, assigns) do
@@ -76,30 +86,34 @@ defmodule LivebookWeb.AppSessionLive do
   end
 
   @impl true
-  def render(%{nonexistent?: true} = assigns) when assigns.app_authenticated? do
+  def render(%{nonexistent?: true} = assigns)
+      when assigns.app_authenticated? and assigns.app_authorized? do
     ~H"""
-    <div class="h-screen flex items-center justify-center">
-      <div class="flex flex-col space-y-4 items-center">
-        <a href={~p"/"}>
-          <img src={~p"/images/logo.png"} height="128" width="128" alt="livebook" />
-        </a>
-        <div class="text-2xl text-gray-800">
-          This app session does not exist
-        </div>
-        <div class="max-w-2xl text-center text-gray-700">
-          <span>Visit the</span>
-          <.link class="border-b border-gray-700 hover:border-none" navigate={~p"/apps/#{@slug}"}>app page</.link>.
+    <Layouts.static>
+      <div class="h-screen flex items-center justify-center">
+        <div class="flex flex-col space-y-4 items-center">
+          <a href={~p"/"}>
+            <img src={~p"/images/logo.png"} height="128" width="128" alt="livebook" />
+          </a>
+          <div class="text-2xl text-gray-800">
+            This app session does not exist
+          </div>
+          <div class="max-w-2xl text-center text-gray-700">
+            <span>Visit the</span>
+            <.link class="border-b border-gray-700 hover:border-none" navigate={~p"/apps/#{@slug}"}>app page</.link>.
+          </div>
         </div>
       </div>
-    </div>
+    </Layouts.static>
     """
   end
 
-  def render(assigns) when assigns.app_authenticated? do
+  def render(assigns) when assigns.app_authenticated? and assigns.app_authorized? do
     ~H"""
-    <div class="h-full relative overflow-y-auto px-4 md:px-20" data-el-notebook>
-      <div class="w-full max-w-screen-lg py-4 mx-auto" data-el-notebook-content>
-        <div class="absolute md:fixed right-4 md:left-4 md:right-auto top-3">
+    <Layouts.app confirm_state={@confirm_state} flash={@flash}>
+      <.apps_banner value={@apps_banner} />
+      <div class="h-full relative overflow-y-auto px-4 md:px-20" data-el-notebook>
+        <div class="absolute right-4 md:left-4 md:right-auto top-3.5">
           <.menu id="app-menu" position="bottom-right" md_position="bottom-left">
             <:toggle>
               <button class="flex items-center text-gray-900">
@@ -107,7 +121,7 @@ defmodule LivebookWeb.AppSessionLive do
                 <.remix_icon icon="arrow-down-s-line" />
               </button>
             </:toggle>
-            <.menu_item :if={@livebook_authenticated?}>
+            <.menu_item :if={@livebook_authorized?}>
               <.link navigate={~p"/"} role="menuitem">
                 <.remix_icon icon="home-6-line" />
                 <span>Home</span>
@@ -134,80 +148,88 @@ defmodule LivebookWeb.AppSessionLive do
                 <span>View source</span>
               </.link>
             </.menu_item>
-            <.menu_item :if={@livebook_authenticated?}>
+            <.menu_item :if={@livebook_authorized?}>
               <.link patch={~p"/sessions/#{@session.id}"} role="menuitem">
                 <.remix_icon icon="terminal-line" />
                 <span>Debug</span>
               </.link>
             </.menu_item>
+            <.menu_item :if={Livebook.Config.logout_enabled?() and @current_user.email != nil}>
+              <button phx-click="logout" role="menuitem">
+                <.remix_icon icon="logout-box-line" />
+                <span>Logout</span>
+              </button>
+            </.menu_item>
           </.menu>
         </div>
-        <div data-el-js-view-iframes phx-update="ignore" id="js-view-iframes"></div>
-        <div class="flex items-center pb-4 mb-2 space-x-4 border-b border-gray-200 pr-20 md:pr-0">
-          <h1 class="text-3xl font-semibold text-gray-800">
-            {@data_view.notebook_name}
-          </h1>
-        </div>
-        <div class="pt-4 flex flex-col gap-6">
-          <.live_component
-            :for={cell_view <- @data_view.cell_views}
-            module={LivebookWeb.AppSessionLive.CellOutputsComponent}
-            id={"outputs-#{cell_view.id}"}
-            cell_view={cell_view}
-            session={@session}
-            client_id={@client_id}
-          />
-          <%= if @data_view.app_status.execution == :error do %>
-            <div class={[
-              "flex justify-between items-center px-4 py-2 border-l-4 shadow-custom-1",
-              "text-red-400 border-red-400"
-            ]}>
-              <div>
-                Something went wrong
-              </div>
-              <div class="flex items-center gap-6">
-                <span class="tooltip top" data-tooltip="Debug">
-                  <.link
-                    :if={@livebook_authenticated?}
-                    navigate={~p"/sessions/#{@session.id}" <> "#cell-#{@data_view.errored_cell_id}"}
+        <div class="w-full py-4 mx-auto" data-el-notebook-content>
+          <div data-el-js-view-iframes phx-update="ignore" id="js-view-iframes"></div>
+          <div class="flex items-center pb-4 mb-2 space-x-4 border-b border-gray-200 pr-20 md:pr-0">
+            <h1 class="text-3xl font-semibold text-gray-800">
+              {@data_view.notebook_name}
+            </h1>
+          </div>
+          <div class="pt-4 flex flex-col gap-6">
+            <.live_component
+              :for={cell_view <- @data_view.cell_views}
+              module={LivebookWeb.AppSessionLive.CellOutputsComponent}
+              id={"outputs-#{cell_view.id}"}
+              cell_view={cell_view}
+              session={@session}
+              client_id={@client_id}
+            />
+            <%= if @data_view.app_status.execution == :error do %>
+              <div class={[
+                "flex justify-between items-center px-4 py-2 border-l-4 shadow-custom-1",
+                "text-red-400 border-red-400 w-full mx-auto max-w-(--breakpoint-lg)"
+              ]}>
+                <div>
+                  Something went wrong
+                </div>
+                <div class="flex items-center gap-6">
+                  <span class="tooltip top" data-tooltip="Debug">
+                    <.link
+                      :if={@livebook_authorized?}
+                      navigate={~p"/sessions/#{@session.id}" <> "#cell-#{@data_view.errored_cell_id}"}
+                    >
+                      <.remix_icon icon="terminal-line" />
+                    </.link>
+                  </span>
+                  <button
+                    class="px-5 py-2 font-medium text-sm inline-flex rounded-lg border whitespace-nowrap items-center justify-center gap-1 border-red-400 text-red-400 hover:bg-red-50 focus:bg-red-50"
+                    phx-click="queue_errored_cells_evaluation"
                   >
-                    <.remix_icon icon="terminal-line" />
-                  </.link>
-                </span>
-                <button
-                  class="px-5 py-2 font-medium text-sm inline-flex rounded-lg border whitespace-nowrap items-center justify-center gap-1 border-red-400 text-red-400 hover:bg-red-50 focus:bg-red-50"
-                  phx-click="queue_errored_cells_evaluation"
-                >
-                  <.remix_icon icon="play-circle-fill" />
-                  <span>Retry</span>
-                </button>
+                    <.remix_icon icon="play-circle-fill" />
+                    <span>Retry</span>
+                  </button>
+                </div>
               </div>
-            </div>
-          <% end %>
+            <% end %>
+          </div>
+          <div style="height: 80vh"></div>
         </div>
-        <div style="height: 80vh"></div>
+        <div class="fixed right-3 bottom-4 flex flex-col gap-2 items-center text-gray-600 w-10">
+          <span
+            :if={
+              @data_view.app_status.execution == :executed and
+                @data_view.any_stale?
+            }
+            class="tooltip left"
+            data-tooltip={
+              ~S'''
+              Some inputs have changed.
+              Click this button to process with latest values.
+              '''
+            }
+          >
+            <.icon_button phx-click="queue_full_evaluation">
+              <.remix_icon icon="play-circle-fill" class="text-3xl leading-none" />
+            </.icon_button>
+          </span>
+          <.app_status_circle status={@data_view.app_status} />
+        </div>
       </div>
-      <div class="fixed right-3 bottom-4 flex flex-col gap-2 items-center text-gray-600 w-10">
-        <span
-          :if={
-            @data_view.app_status.execution == :executed and
-              @data_view.any_stale?
-          }
-          class="tooltip left"
-          data-tooltip={
-            ~S'''
-            Some inputs have changed.
-            Click this button to process with latest values.
-            '''
-          }
-        >
-          <.icon_button phx-click="queue_full_evaluation">
-            <.remix_icon icon="play-circle-fill" class="text-3xl leading-none" />
-          </.icon_button>
-        </span>
-        <.app_status_circle status={@data_view.app_status} />
-      </div>
-    </div>
+    </Layouts.app>
 
     <.modal
       :if={@live_action == :source and @data_view.show_source}
@@ -222,6 +244,16 @@ defmodule LivebookWeb.AppSessionLive do
         session={@session}
       />
     </.modal>
+    """
+  end
+
+  def render(assigns) when not assigns.app_authorized? do
+    ~H"""
+    <LivebookWeb.ErrorHTML.error_page
+      status={401}
+      title="Not authorized"
+      details="You don't have permission to access this app"
+    />
     """
   end
 
@@ -332,8 +364,8 @@ defmodule LivebookWeb.AppSessionLive do
   end
 
   @impl true
-  def handle_info({:operation, operation}, socket) do
-    {:noreply, handle_operation(socket, operation)}
+  def handle_info({:operations, operations}, socket) do
+    {:noreply, Enum.reduce(operations, socket, &handle_operation(&2, &1))}
   end
 
   def handle_info({:set_input_values, values, local}, socket) do
@@ -356,6 +388,24 @@ defmodule LivebookWeb.AppSessionLive do
 
   def handle_info(:session_closed, socket) do
     {:noreply, redirect_on_closed(socket)}
+  end
+
+  def handle_info({:app_deployment_updated, %{slug: slug}}, %{assigns: %{slug: slug}} = socket) do
+    # We force the redirection in case of
+    # the current user loses access to this app.
+
+    # With this strategy, we guarantee that unauthorized users
+    # won't be able to keep reading the app which they
+    # should't have access.
+    {:ok, app} = Livebook.Apps.fetch_app(slug)
+
+    if socket.assigns.app_authorized? and
+         Livebook.Apps.authorized?(app, socket.assigns.current_user) do
+      {:noreply, socket}
+    else
+      {:noreply,
+       push_navigate(socket, to: ~p"/apps/#{slug}/sessions/#{socket.assigns.session.id}")}
+    end
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
@@ -444,7 +494,8 @@ defmodule LivebookWeb.AppSessionLive do
             id: cell.id,
             input_views: input_views_for_cell(cell, data, changed_input_ids),
             outputs: filter_outputs(cell.outputs, data.notebook.app_settings.output_type),
-            outputs_batch_number: data.cell_infos[cell.id].eval.outputs_batch_number
+            outputs_batch_number: data.cell_infos[cell.id].eval.outputs_batch_number,
+            output_size: cell.output_size
           }
         end,
       app_status: data.app_data.status,

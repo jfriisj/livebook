@@ -94,22 +94,17 @@ defmodule Livebook.Hubs.Team do
       changeset
     end
   end
-
-  @doc """
-  Returns the public key prefix
-  """
-  @spec public_key_prefix() :: String.t()
-  def public_key_prefix(), do: "lb_opk_"
 end
 
 defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
   alias Livebook.Hubs.{Team, TeamClient}
-  alias Livebook.Teams.Requests
+  alias Livebook.Teams
   alias Livebook.FileSystem
   alias Livebook.Secrets.Secret
 
-  @teams_key_prefix Livebook.Teams.Org.teams_key_prefix()
-  @public_key_prefix Livebook.Hubs.Team.public_key_prefix()
+  @teams_key_prefix Teams.Constants.teams_key_prefix()
+  @public_key_prefix Teams.Constants.public_key_prefix()
+  @org_token_prefix Teams.Constants.org_token_prefix()
 
   def load(team, fields) do
     {offline?, fields} = Map.pop(fields, :offline?, false)
@@ -137,23 +132,14 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
 
   def type(_team), do: "team"
 
+  def connection_spec(%{session_token: @org_token_prefix <> _}), do: nil
   def connection_spec(team), do: {TeamClient, team}
 
   def disconnect(team), do: TeamClient.stop(team.id)
 
   def connection_status(team) do
-    cond do
-      team.offline ->
-        "You are running an offline Workspace for deployment. You cannot modify its settings."
-
-      team.user_id == nil ->
-        "You are running a Livebook app server. This workspace is in read-only mode."
-
-      reason = TeamClient.get_connection_status(team.id) ->
-        "Cannot connect to Teams: #{reason}.\nWill attempt to reconnect automatically..."
-
-      true ->
-        nil
+    if reason = TeamClient.get_connection_status(team.id) do
+      "Cannot connect to Teams: #{reason}.\nWill attempt to reconnect automatically..."
     end
   end
 
@@ -170,7 +156,7 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
     @teams_key_prefix <> teams_key = team.teams_key
     token = Livebook.Stamping.chapoly_encrypt(metadata, notebook_source, teams_key)
 
-    case Requests.org_sign(team, token) do
+    case Teams.Requests.org_sign(team, token) do
       {:ok, %{"signature" => token_signature}} ->
         stamp = %{"version" => 1, "token" => token, "token_signature" => token_signature}
         {:ok, stamp}
@@ -211,7 +197,7 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
   def get_secrets(team), do: TeamClient.get_secrets(team.id)
 
   def create_secret(%Team{} = team, %Secret{} = secret) do
-    case Requests.create_secret(team, secret) do
+    case Teams.Requests.create_secret(team, secret) do
       {:ok, %{"id" => _}} -> :ok
       {:error, %{"errors" => errors}} -> {:error, parse_secret_errors(errors)}
       any -> any
@@ -219,7 +205,7 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
   end
 
   def update_secret(%Team{} = team, %Secret{} = secret) do
-    case Requests.update_secret(team, secret) do
+    case Teams.Requests.update_secret(team, secret) do
       {:ok, %{"id" => _}} -> :ok
       {:error, %{"errors" => errors}} -> {:error, parse_secret_errors(errors)}
       any -> any
@@ -227,7 +213,7 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
   end
 
   def delete_secret(%Team{} = team, %Secret{} = secret) do
-    case Requests.delete_secret(team, secret) do
+    case Teams.Requests.delete_secret(team, secret) do
       {:ok, _} -> :ok
       {:error, %{"errors" => errors}} -> {:error, parse_secret_errors(errors)}
       any -> any
@@ -237,7 +223,7 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
   def get_file_systems(team), do: TeamClient.get_file_systems(team.id)
 
   def create_file_system(%Team{} = team, file_system) do
-    case Requests.create_file_system(team, file_system) do
+    case Teams.Requests.create_file_system(team, file_system) do
       {:ok, %{"id" => _}} -> :ok
       {:error, %{"errors" => errors}} -> {:error, parse_file_system_errors(file_system, errors)}
       any -> any
@@ -245,7 +231,7 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
   end
 
   def update_file_system(%Team{} = team, file_system) do
-    case Requests.update_file_system(team, file_system) do
+    case Teams.Requests.update_file_system(team, file_system) do
       {:ok, %{"id" => _}} -> :ok
       {:error, %{"errors" => errors}} -> {:error, parse_file_system_errors(file_system, errors)}
       any -> any
@@ -253,7 +239,7 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
   end
 
   def delete_file_system(%Team{} = team, file_system) do
-    case Requests.delete_file_system(team, file_system) do
+    case Teams.Requests.delete_file_system(team, file_system) do
       {:ok, _} -> :ok
       {:error, %{"errors" => errors}} -> {:error, parse_file_system_errors(file_system, errors)}
       any -> any
@@ -268,18 +254,25 @@ defimpl Livebook.Hubs.Provider, for: Livebook.Hubs.Team do
         slug: app_deployment.slug,
         version: app_deployment.version,
         hub_id: app_deployment.hub_id,
-        app_deployment_id: app_deployment.id
+        app_deployment_id: app_deployment.id,
+        app_folder_id: app_deployment.app_folder_id
       }
     end
   end
 
+  def get_app_folders(team) do
+    team.id
+    |> TeamClient.get_app_folders()
+    |> Enum.sort_by(& &1.name)
+  end
+
   defp parse_secret_errors(errors_map) do
-    Requests.to_error_list(Secret, errors_map)
+    Teams.Requests.to_error_list(Secret, errors_map)
   end
 
   defp parse_file_system_errors(%struct{} = file_system, errors_map) do
     %{error_field: field} = FileSystem.external_metadata(file_system)
     errors_map = Map.new(errors_map, fn {_key, values} -> {field, values} end)
-    Requests.to_error_list(struct, errors_map)
+    Teams.Requests.to_error_list(struct, errors_map)
   end
 end

@@ -4,23 +4,7 @@ defmodule LivebookWeb.AppLive do
   import LivebookWeb.AppComponents
 
   @impl true
-  def mount(%{"slug" => slug}, _session, socket) when socket.assigns.app_authenticated? do
-    if socket.assigns.app_settings.multi_session do
-      {:ok, app} = Livebook.Apps.fetch_app(slug)
-
-      if connected?(socket) do
-        Livebook.App.subscribe(slug)
-      end
-
-      {:ok, assign(socket, app: app)}
-    else
-      {:ok, pid} = Livebook.Apps.fetch_pid(slug)
-      session_id = Livebook.App.get_session_id(pid, user: socket.assigns.current_user)
-      {:ok, push_navigate(socket, to: ~p"/apps/#{slug}/sessions/#{session_id}")}
-    end
-  end
-
-  def mount(%{"slug" => slug}, _session, socket) do
+  def mount(%{"slug" => slug}, _session, socket) when not socket.assigns.app_authenticated? do
     if connected?(socket) do
       {:ok, push_navigate(socket, to: ~p"/apps/#{slug}/authenticate")}
     else
@@ -28,26 +12,54 @@ defmodule LivebookWeb.AppLive do
     end
   end
 
+  def mount(%{"slug" => slug}, _session, socket) when not socket.assigns.app_authorized? do
+    if connected?(socket) do
+      Livebook.Teams.Broadcasts.subscribe(:app_deployments)
+    end
+
+    {:ok, app} = Livebook.Apps.fetch_app(slug)
+    {:ok, assign(socket, app: app), layout: false}
+  end
+
+  def mount(%{"slug" => slug} = params, _session, socket) do
+    if socket.assigns.app_settings.multi_session do
+      {:ok, app} = Livebook.Apps.fetch_app(slug)
+
+      if connected?(socket) do
+        Livebook.App.subscribe(slug)
+        Livebook.Teams.Broadcasts.subscribe(:app_deployments)
+      end
+
+      {:ok,
+       assign(socket, app: app, query_params: params, apps_banner: Livebook.Config.apps_banner())}
+    else
+      {:ok, pid} = Livebook.Apps.fetch_pid(slug)
+      session_id = Livebook.App.get_session_id(pid, user: socket.assigns.current_user)
+      {:ok, push_navigate(socket, to: ~p"/apps/#{slug}/sessions/#{session_id}")}
+    end
+  end
+
   @impl true
-  def render(assigns) when assigns.app_authenticated? do
+  def render(assigns) when assigns.app_authenticated? and assigns.app_authorized? do
     ~H"""
-    <div class="h-full relative overflow-y-auto px-4 md:px-20">
-      <div class="w-full max-w-screen-lg py-4 mx-auto">
-        <div class="absolute md:fixed right-8 md:left-4 top-3 w-10 h-10">
-          <.link navigate={~p"/"}>
-            <img src={~p"/images/logo.png"} height="40" widthz="40" alt="logo livebook" />
-          </.link>
+    <Layouts.app confirm_state={@confirm_state} flash={@flash}>
+      <.apps_banner value={@apps_banner} />
+      <div class="h-full relative overflow-y-auto px-4 md:px-20">
+        <div class="absolute right-8 md:left-4 top-3.5 w-10 h-10">
+          <img src={~p"/images/logo.png"} height="40" width="40" alt="logo livebook" />
         </div>
-        <div class="flex items-center pb-4 mb-2 space-x-4 border-b border-gray-200 pr-20 md:pr-0">
-          <h1 class="text-3xl font-semibold text-gray-800">
-            {@app.notebook_name}
-          </h1>
-        </div>
-        <div class="pt-4 flex flex-col space-y-16">
-          <.content_skeleton :for={_idx <- 1..5} empty={false} />
+        <div class="w-full max-w-(--breakpoint-lg) py-4 mx-auto">
+          <div class="flex items-center pb-4 mb-2 space-x-4 border-b border-gray-200 pr-20 md:pr-0">
+            <h1 class="text-3xl font-semibold text-gray-800">
+              {@app.notebook_name}
+            </h1>
+          </div>
+          <div class="pt-4 flex flex-col space-y-16">
+            <.content_skeleton :for={_idx <- 1..5} empty={false} />
+          </div>
         </div>
       </div>
-    </div>
+    </Layouts.app>
 
     <.modal id="sessions-modal" show width="big" patch={~p"/apps"}>
       <div class="flex flex-col space-y-3">
@@ -90,15 +102,38 @@ defmodule LivebookWeb.AppLive do
     """
   end
 
+  def render(assigns) when not assigns.app_authorized? do
+    ~H"""
+    <LivebookWeb.ErrorHTML.error_page
+      status={401}
+      title="Not authorized"
+      details="You don't have permission to access this app"
+    />
+    """
+  end
+
   def render(assigns), do: auth_placeholder(assigns)
 
   @impl true
   def handle_params(_params, _url, socket) when socket.assigns.live_action == :new_session do
-    session_id =
-      Livebook.App.get_session_id(socket.assigns.app.pid, user: socket.assigns.current_user)
+    app = socket.assigns.app
+    opts = [user: socket.assigns.current_user]
 
-    {:noreply,
-     push_navigate(socket, to: ~p"/apps/#{socket.assigns.app.slug}/sessions/#{session_id}")}
+    opts =
+      if socket.assigns.app_settings.multi_session do
+        params =
+          for {key, value} <- socket.assigns.query_params,
+              key = lb_query_param(key),
+              into: %{},
+              do: {key, value}
+
+        Keyword.put(opts, :session_params, params)
+      else
+        opts
+      end
+
+    session_id = Livebook.App.get_session_id(app.pid, opts)
+    {:noreply, push_navigate(socket, to: ~p"/apps/#{app.slug}/sessions/#{session_id}")}
   end
 
   def handle_params(_params, _url, socket), do: {:noreply, socket}
@@ -108,9 +143,25 @@ defmodule LivebookWeb.AppLive do
     {:noreply, assign(socket, :app, app)}
   end
 
+  def handle_info(
+        {:app_deployment_updated, %{slug: slug}},
+        %{assigns: %{app: %{slug: slug} = app}} = socket
+      ) do
+    if socket.assigns.app_authorized? and
+         Livebook.Apps.authorized?(app, socket.assigns.current_user) do
+      {:noreply, socket}
+    else
+      {:noreply, redirect(socket, to: ~p"/apps/#{slug}")}
+    end
+  end
+
   def handle_info(_message, socket), do: {:noreply, socket}
 
   defp active_sessions(sessions) do
     Enum.filter(sessions, &(&1.app_status.lifecycle == :active))
   end
+
+  defp lb_query_param("lb_" <> param), do: param
+  defp lb_query_param("LB_" <> param), do: param
+  defp lb_query_param(_), do: nil
 end

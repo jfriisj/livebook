@@ -91,7 +91,7 @@ defmodule LivebookWeb.Output do
       js_view={@js_view}
       session_id={@session_id}
       client_id={@client_id}
-      timeout_message="Output data no longer available, please reevaluate this cell"
+      unreachable_message="Output data no longer available, please reevaluate this cell"
     />
     """
   end
@@ -349,7 +349,7 @@ defmodule LivebookWeb.Output do
   defp render_output(%{type: :error, context: :dependencies} = output, %{id: id, cell_id: cell_id}) do
     assigns = %{message: output.message, id: id, cell_id: cell_id}
 
-    if cell_id == Livebook.Notebook.Cell.setup_cell_id() do
+    if cell_id == Livebook.Notebook.Cell.main_setup_cell_id() do
       ~H"""
       <div class="flex flex-col gap-4">
         <div class="flex items-center justify-between gap-2" style="color: var(--ansi-color-red);">
@@ -398,7 +398,7 @@ defmodule LivebookWeb.Output do
 
     ~H"""
     <div
-      class="whitespace-pre-wrap break-words font-editor text-red-600"
+      class="whitespace-pre-wrap wrap-break-word font-editor text-red-600"
       role="complementary"
       aria-label="error message"
       phx-no-format
@@ -413,7 +413,7 @@ defmodule LivebookWeb.Output do
     <div id={@id} class="relative group/error">
       <div
         id={"#{@id}-message"}
-        class="whitespace-pre-wrap break-words font-editor text-gray-500"
+        class="whitespace-pre-wrap wrap-break-word font-editor text-gray-500"
         role="complementary"
         aria-label="error"
         phx-no-format

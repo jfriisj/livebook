@@ -4,26 +4,14 @@ defmodule Livebook.Teams do
   alias Livebook.Hubs
   alias Livebook.Hubs.Team
   alias Livebook.Hubs.TeamClient
-  alias Livebook.Teams.{Agent, AppDeployment, DeploymentGroup, Org, Requests}
+  alias Livebook.Teams
+  alias Livebook.Teams.Org
+  alias Livebook.Teams.Requests
 
   import Ecto.Changeset,
     only: [add_error: 3, apply_action: 2, apply_action!: 2, get_field: 2]
 
-  @prefix Org.teams_key_prefix()
-
-  @doc """
-  Creates an Org.
-
-  With success, returns the response from Livebook Teams API to continue the org creation flow.
-  Otherwise, it will return an error tuple with changeset.
-  """
-  @spec create_org(Org.t(), map()) ::
-          {:ok, map()}
-          | {:error, Ecto.Changeset.t()}
-          | {:transport_error, String.t()}
-  def create_org(%Org{} = org, attrs) do
-    create_org_request(org, attrs, &Requests.create_org/1)
-  end
+  @teams_key_prefix Teams.Constants.teams_key_prefix()
 
   @doc """
   Joins an Org.
@@ -36,14 +24,10 @@ defmodule Livebook.Teams do
           | {:error, Ecto.Changeset.t()}
           | {:transport_error, String.t()}
   def join_org(%Org{} = org, attrs) do
-    create_org_request(org, attrs, &Requests.join_org/1)
-  end
-
-  defp create_org_request(%Org{} = org, attrs, callback) when is_function(callback, 1) do
     changeset = Org.changeset(org, attrs)
 
     with {:ok, %Org{} = org} <- apply_action(changeset, :insert) do
-      case callback.(org) do
+      case Requests.join_org(org) do
         {:ok, response} ->
           {:ok, response}
 
@@ -146,7 +130,7 @@ defmodule Livebook.Teams do
   Derives the secret and sign secret from given `teams_key`.
   """
   @spec derive_key(String.t()) :: bitstring()
-  def derive_key(@prefix <> teams_key) do
+  def derive_key(@teams_key_prefix <> teams_key) do
     binary_key = Base.url_decode64!(teams_key, padding: false)
     Plug.Crypto.KeyGenerator.generate(binary_key, "notebook secret", cache: Plug.Crypto.Keys)
   end
@@ -154,22 +138,22 @@ defmodule Livebook.Teams do
   @doc """
   Returns an `%Ecto.Changeset{}` for tracking deployment group changes.
   """
-  @spec change_deployment_group(DeploymentGroup.t(), map()) :: Ecto.Changeset.t()
-  def change_deployment_group(%DeploymentGroup{} = deployment_group, attrs \\ %{}) do
-    DeploymentGroup.changeset(deployment_group, attrs)
+  @spec change_deployment_group(Teams.DeploymentGroup.t(), map()) :: Ecto.Changeset.t()
+  def change_deployment_group(%Teams.DeploymentGroup{} = deployment_group, attrs \\ %{}) do
+    Teams.DeploymentGroup.changeset(deployment_group, attrs)
   end
 
   @doc """
   Creates a Deployment Group.
   """
   @spec create_deployment_group(Team.t(), map()) ::
-          {:ok, DeploymentGroup.t()}
+          {:ok, Teams.DeploymentGroup.t()}
           | {:error, Ecto.Changeset.t()}
           | {:transport_error, String.t()}
   def create_deployment_group(%Team{} = team, attrs) do
-    changeset = DeploymentGroup.changeset(%DeploymentGroup{}, attrs)
+    changeset = Teams.DeploymentGroup.changeset(%Teams.DeploymentGroup{}, attrs)
 
-    with {:ok, %DeploymentGroup{} = deployment_group} <- apply_action(changeset, :insert) do
+    with {:ok, %Teams.DeploymentGroup{} = deployment_group} <- apply_action(changeset, :insert) do
       case Requests.create_deployment_group(team, deployment_group) do
         {:ok, %{"id" => id}} ->
           {:ok, %{deployment_group | id: to_string(id)}}
@@ -189,46 +173,46 @@ defmodule Livebook.Teams do
   @doc """
   Gets a list of deployment groups for a given Hub.
   """
-  @spec get_deployment_groups(Team.t()) :: list(DeploymentGroup.t())
+  @spec get_deployment_groups(Team.t()) :: list(Teams.DeploymentGroup.t())
   def get_deployment_groups(team) do
     TeamClient.get_deployment_groups(team.id)
   end
 
   @doc """
-  Creates a new app deployment.
+  Deploys the given app deployment.
   """
-  @spec deploy_app(Team.t(), AppDeployment.t()) ::
+  @spec deploy_app(Team.t(), Teams.AppDeployment.t()) ::
           :ok
           | {:error, Ecto.Changeset.t()}
           | {:transport_error, String.t()}
-  def deploy_app(%Team{} = team, %AppDeployment{} = app_deployment) do
+  def deploy_app(%Team{} = team, %Teams.AppDeployment{} = app_deployment) do
     case Requests.deploy_app(team, app_deployment) do
-      {:ok, %{"id" => _id}} ->
-        :ok
-
-      {:error, %{"errors" => %{"detail" => error}}} ->
-        {:error, add_external_errors(app_deployment, %{"file" => [error]})}
-
-      {:error, %{"errors" => errors}} ->
-        {:error, add_external_errors(app_deployment, errors)}
-
-      any ->
-        any
+      {:ok, %{"id" => _id}} -> :ok
+      {:error, %{"errors" => errors}} -> {:error, add_external_errors(app_deployment, errors)}
+      any -> any
     end
   end
 
   @doc """
   Gets a list of app deployments for a given Hub.
   """
-  @spec get_app_deployments(Team.t()) :: list(AppDeployment.t())
+  @spec get_app_deployments(Team.t()) :: list(Teams.AppDeployment.t())
   def get_app_deployments(team) do
     TeamClient.get_app_deployments(team.id)
   end
 
   @doc """
+  Gets an app deployment for a given Hub.
+  """
+  @spec get_app_deployment(Team.t(), String.t(), String.t()) :: Teams.AppDeployment.t() | nil
+  def get_app_deployment(team, slug, deployment_group_id) do
+    TeamClient.get_app_deployment(team.id, slug, deployment_group_id)
+  end
+
+  @doc """
   Gets a list of agents for a given Hub.
   """
-  @spec get_agents(Team.t()) :: list(Agent.t())
+  @spec get_agents(Team.t()) :: list(Teams.Agent.t())
   def get_agents(team) do
     TeamClient.get_agents(team.id)
   end
@@ -236,9 +220,55 @@ defmodule Livebook.Teams do
   @doc """
   Gets a list of environment variables for a given Hub.
   """
-  @spec get_environment_variables(Team.t()) :: list(Agent.t())
+  @spec get_environment_variables(Team.t()) :: list(Teams.EnvironmentVariable.t())
   def get_environment_variables(team) do
     TeamClient.get_environment_variables(team.id)
+  end
+
+  @doc """
+  Fetches the CLI session using a org token.
+  """
+  @spec fetch_cli_session(map()) ::
+          {:ok, Team.t()} | {:error, String.t()} | {:transport_error, String.t()}
+  def fetch_cli_session(%{session_token: _, teams_key: _} = config) do
+    with {:ok, %{"name" => name} = attrs} <- Requests.fetch_cli_session(config) do
+      id = "team-#{name}"
+
+      hub =
+        Hubs.save_hub(%Team{
+          id: id,
+          hub_name: name,
+          hub_emoji: "🚀",
+          user_id: nil,
+          org_id: attrs["org_id"],
+          org_key_id: attrs["org_key_id"],
+          session_token: config.session_token,
+          teams_key: config.teams_key,
+          org_public_key: attrs["public_key"]
+        })
+
+      {:ok, hub}
+    else
+      {:error, %{"errors" => %{"detail" => error_message}}} -> {:error, error_message}
+      api_result -> api_result
+    end
+  end
+
+  @doc """
+  Deploys the given app deployment to given deployment group using an org token.
+  """
+  @spec deploy_app_from_cli(Team.t(), Teams.AppDeployment.t(), integer(), keyword()) ::
+          {:ok, map()} | {:error, map()} | {:transport_error, String.t()}
+  def deploy_app_from_cli(
+        %Team{} = team,
+        %Teams.AppDeployment{} = app_deployment,
+        deployment_group_id,
+        opts \\ []
+      ) do
+    with {:error, %{"errors" => errors}} <-
+           Requests.deploy_app_from_cli(team, app_deployment, deployment_group_id, opts) do
+      {:error, errors}
+    end
   end
 
   defp map_teams_field_to_livebook_field(map, teams_field, livebook_field) do
@@ -256,5 +286,37 @@ defmodule Livebook.Teams do
 
   defp add_external_errors(struct, errors_map) do
     struct |> Ecto.Changeset.change() |> add_external_errors(errors_map)
+  end
+
+  @doc """
+  Checks if the given user has access to deploy apps to given deployment group.
+  """
+  @spec user_can_deploy?(Team.t(), Teams.DeploymentGroup.t()) :: boolean()
+  def user_can_deploy?(%Team{} = team, %Teams.DeploymentGroup{} = deployment_group) do
+    TeamClient.user_can_deploy?(team.id, team.user_id, deployment_group.id)
+  end
+
+  @doc """
+  Gets a list of app folders for a given Hub.
+  """
+  @spec get_app_folders(Team.t()) :: list(Teams.AppFolder.t())
+  def get_app_folders(team) do
+    Hubs.Provider.get_app_folders(team)
+  end
+
+  @doc """
+  Gets a list of notifications from Livebook Teams.
+  """
+  @spec get_notifications() :: list(Teams.Notification.t())
+  def get_notifications do
+    hubs = Hubs.get_hubs()
+
+    if team = Enum.find(hubs, &match?(%Team{}, &1)) do
+      team.id
+      |> TeamClient.get_notifications()
+      |> Enum.sort_by(& &1.id)
+    else
+      []
+    end
   end
 end

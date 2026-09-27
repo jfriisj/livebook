@@ -4,7 +4,6 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
   alias Livebook.Hubs
   alias Livebook.Hubs.Provider
   alias Livebook.Teams
-  alias LivebookWeb.LayoutComponents
   alias LivebookWeb.NotFoundError
 
   @impl true
@@ -15,7 +14,6 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
     secrets = Hubs.get_secrets(assigns.hub)
     file_systems = Hubs.get_file_systems(assigns.hub, hub_only: true)
     deployment_groups = Teams.get_deployment_groups(assigns.hub)
-    app_deployments = Teams.get_app_deployments(assigns.hub)
     agents = Teams.get_agents(assigns.hub)
     environment_variables = Teams.get_environment_variables(assigns.hub)
     secret_name = assigns.params["secret_name"]
@@ -42,7 +40,6 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
        file_system_id: file_system_id,
        file_systems: file_systems,
        deployment_groups: Enum.sort_by(deployment_groups, & &1.name),
-       app_deployments: Enum.frequencies_by(app_deployments, & &1.deployment_group_id),
        agents: Enum.frequencies_by(agents, & &1.deployment_group_id),
        environment_variables:
          Enum.frequencies_by(environment_variables, & &1.deployment_group_id),
@@ -50,7 +47,8 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
        secret_name: secret_name,
        secret_value: secret_value,
        hub_metadata: Provider.to_metadata(assigns.hub),
-       default?: default?
+       default?: default?,
+       disabled?: Hubs.TeamClient.version_enforcement(assigns.hub.id) != nil
      )
      |> assign_form(changeset)}
   end
@@ -59,11 +57,11 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
   def render(assigns) do
     ~H"""
     <div>
-      <LayoutComponents.topbar :if={Provider.connection_status(@hub)} variant="warning">
+      <Layouts.topbar :if={Provider.connection_status(@hub)} variant="warning">
         {Provider.connection_status(@hub)}
-      </LayoutComponents.topbar>
+      </Layouts.topbar>
 
-      <LayoutComponents.topbar :if={@hub.billing_status.type == :trialing} variant="warning">
+      <Layouts.topbar :if={@hub.billing_status.type == :trialing} variant="warning">
         <h2>
           Your organization has
           <strong>
@@ -74,21 +72,21 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
             href="mailto:suport@livebook.dev?subject=Help%20with%20Livebook%20Teams"
           >Contact us</a>.
         </h2>
-      </LayoutComponents.topbar>
+      </Layouts.topbar>
 
-      <LayoutComponents.topbar :if={@hub.billing_status.disabled} variant="warning">
+      <Layouts.topbar :if={@hub.billing_status.disabled} variant="warning">
         <h2>
           Workspace disabled: your organization doesn't have an active subscription. Please contact your <.link
             href={org_url(@hub, "/users")}
             class="underline"
           >org's admin</.link>.
         </h2>
-      </LayoutComponents.topbar>
+      </Layouts.topbar>
 
-      <div class="p-4 md:px-12 md:py-7 max-w-screen-md mx-auto">
+      <div class="p-4 md:px-12 md:py-7 max-w-(--breakpoint-md) mx-auto">
         <div id={"#{@id}-component"}>
           <div class="mb-8 flex flex-col space-y-2">
-            <LayoutComponents.title>
+            <.title>
               <div class="flex gap-2 items-center">
                 <div class="flex justify-center">
                   <span class="relative">
@@ -109,7 +107,7 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
                   </span>
                 <% end %>
               </div>
-            </LayoutComponents.title>
+            </.title>
 
             <p class="text-sm flex flex-row space-x-6 text-gray-700">
               <a href={org_url(@hub, "/")} class="hover:text-blue-600">
@@ -173,7 +171,7 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
                   <.emoji_field field={@form[:hub_emoji]} label="Emoji" />
                 </div>
 
-                <div class="!mt-6">
+                <div class="mt-6!">
                   <.button type="submit" phx-disable-with="Updating...">
                     Save
                   </.button>
@@ -181,7 +179,7 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
               </.form>
             </div>
 
-            <div class="flex flex-col space-y-4">
+            <div :if={not @disabled?} class="flex flex-col space-y-4">
               <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
                 Secrets
               </h2>
@@ -212,7 +210,7 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
               </div>
             </div>
 
-            <div class="flex flex-col space-y-4">
+            <div :if={not @disabled?} class="flex flex-col space-y-4">
               <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
                 File storages
               </h2>
@@ -231,7 +229,7 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
               />
             </div>
 
-            <div class="flex flex-col space-y-4">
+            <div :if={not @disabled?} class="flex flex-col space-y-4">
               <h2 class="text-xl text-gray-800 font-medium pb-2 border-b border-gray-200">
                 Deployment groups
               </h2>
@@ -250,7 +248,7 @@ defmodule LivebookWeb.Hub.Edit.TeamComponent do
                   id={"hub-deployment-group-#{deployment_group.id}"}
                   hub={@hub}
                   deployment_group={deployment_group}
-                  app_deployments_count={Map.get(@app_deployments, deployment_group.id, 0)}
+                  app_deployments_count={deployment_group.deployed_apps_counter}
                   environment_variables_count={
                     Map.get(@environment_variables, deployment_group.id, 0)
                   }
